@@ -251,9 +251,10 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
     # ── 4. Encode ───────────────────────────────────────────────────────
     await rt.repo.transition(job.id, JobStatus.ENCODING, stage="encoding")
     out_name = build_output_name(
-        job.input_name, height=plan.target_height_label,
-        codec=plan.video_codec, container=plan.container,
+        job.input_name, container=plan.container,
         hardsub=plan.subtitle_mode == "hard",
+        sub_lang=plan.subtitle_lang,
+        height=plan.target_height_label,
     )
     output_path = unique_path(work / "output" / out_name)
     async with rt.manager.encode_sem:
@@ -444,6 +445,7 @@ async def _prepare_subtitles(rt: Runtime, job: Job, media: MediaInfo,
             return ["No embedded text subtitle found — encoded without subtitles."]
         log.info("Job %s: hardsubbing embedded stream #%d (%s)",
                  job.id, stream.type_index, stream.language)
+        plan.subtitle_lang = stream.language
         raw_path = await extract_text_subtitle(
             str(input_path), stream, work / "subtitles",
             ffmpeg=cfg.ffmpeg_path, cancel_token=token,
@@ -453,6 +455,7 @@ async def _prepare_subtitles(rt: Runtime, job: Job, media: MediaInfo,
         stream = next((s for s in media.subtitles if s.type_index == idx), None)
         if stream is None:
             raise SubtitleError(f"Embedded subtitle stream #{idx} was not found.")
+        plan.subtitle_lang = stream.language
         raw_path = await extract_text_subtitle(
             str(input_path), stream, work / "subtitles",
             ffmpeg=cfg.ffmpeg_path, cancel_token=token,
@@ -461,6 +464,9 @@ async def _prepare_subtitles(rt: Runtime, job: Job, media: MediaInfo,
         raw_path = str(job.options.get("subtitle_file", ""))
         if not raw_path or not Path(raw_path).exists():
             raise SubtitleError("The subtitle file is missing — upload it again.")
+        # External subtitle (uploaded or matched from Seedr) — its language
+        # isn't probed, so use the user's preferred language for naming.
+        plan.subtitle_lang = preferred_lang or cfg.preferred_sub_lang
 
     prepared = prepare_subtitle_file(raw_path, work / "subtitles", fps=fps)
     warnings += prepared.report.warnings

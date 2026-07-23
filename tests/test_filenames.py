@@ -36,14 +36,38 @@ def test_clean_title_strips_release_clutter():
     assert "Great Show" in t and "04" in t
 
 
-def test_build_output_name_examples():
-    assert build_output_name("Episode 01.mkv", height=360, codec="libx264",
-                             container="mp4") == "Episode_01_360p_H264.mp4"
-    assert build_output_name("Episode 01.mkv", height=720, codec="libx265",
-                             container="mkv") == "Episode_01_720p_HEVC.mkv"
-    name = build_output_name("Episode 01.mkv", height=1080, codec="libx264",
-                             container="mp4", hardsub=True)
-    assert name == "Episode_01_1080p_H264_HARDSUB.mp4"
+def test_build_output_name_clean_hardsub():
+    # The real-world messy names the user complained about.
+    n = build_output_name(
+        "[Erai-raws] Otome Kaijuu Carameliser - 03 [480p CR WEB-DL AVC AAC]"
+        "[MultiSub][4A1B5F1C].mkv",
+        container="mp4", hardsub=True, sub_lang="fre")
+    assert n == "Otome_Kaijuu_Carameliser_S01E03_VOSTFR.mp4"
+
+    n = build_output_name(
+        "Mebius Dust S01E03 VOSTFR 720p WEB x264 AAC -Tsundere-Raws (CR).mkv",
+        container="mp4", hardsub=True, sub_lang="fr")
+    assert n == "Mebius_Dust_S01E03_VOSTFR.mp4"
+
+
+def test_build_output_name_lang_tags():
+    base = "Show S02E05.mkv"
+    assert build_output_name(base, hardsub=True, sub_lang="en") \
+        == "Show_S02E05_VOSTEN.mp4"
+    assert build_output_name(base, hardsub=True, sub_lang="es") \
+        == "Show_S02E05_VOSTES.mp4"
+
+
+def test_build_output_name_no_subs_keeps_resolution_when_no_episode():
+    # A movie/single file with no episode number keeps the resolution so
+    # different renditions don't collide.
+    n = build_output_name("Spirited Away.mkv", container="mkv", height=1080)
+    assert n == "Spirited_Away_1080p.mkv"
+
+
+def test_build_output_name_episode_only():
+    assert build_output_name("Great Show - 4.mkv", container="mp4") \
+        == "Great_Show_S01E04.mp4"
 
 
 def test_unique_path(tmp_path: Path):

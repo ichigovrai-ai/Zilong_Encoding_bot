@@ -128,6 +128,7 @@ class EncodePlan:
     subtitle_mode: str = "none"      # none | hard | soft | strip
     subtitle_path: str = ""          # prepared local file (hard/soft)
     subtitle_stream: int | None = None  # embedded subtitle type-index for hard burn
+    subtitle_lang: str = ""          # language of the burned subtitle (for naming)
     fonts_dir: str = ""
     deinterlace: bool = False
 

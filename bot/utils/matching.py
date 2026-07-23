@@ -65,6 +65,29 @@ def extract_episode(name: str) -> EpisodeKey | None:
     return None
 
 
+def split_title_episode(name: str) -> tuple[str, EpisodeKey | None]:
+    """Split a release filename into (title-before-the-episode, EpisodeKey).
+
+    Everything from the episode marker onward (episode number, release group,
+    tags) is dropped, so the title comes out clean:
+      "[Erai-raws] Otome Kaijuu Carameliser - 03 [480p CR][MultiSub].mkv"
+        → ("Otome Kaijuu Carameliser", E03)
+      "Mebius Dust S01E03 VOSTFR 720p x264 -Group.mkv"
+        → ("Mebius Dust", S01E03)
+    """
+    stem = PurePosixPath(name.replace("\\", "/")).stem
+    stem = _BRACKETS.sub(" ", stem)
+    for pat in (_SEASON_EP, _X_EP):
+        if m := pat.search(stem):
+            return stem[:m.start()], EpisodeKey(int(m.group(1)), int(m.group(2)))
+    if m := _EP_WORD.search(stem):
+        return stem[:m.start()], EpisodeKey(None, int(m.group(1)))
+    cleaned = re.sub(r"\s{2,}", " ", _TAGS.sub(" ", stem))
+    if m := _DASH_NUM.search(cleaned):
+        return cleaned[:m.start()], EpisodeKey(None, int(m.group(1)))
+    return stem, None
+
+
 class MatchConfidence(Enum):
     EXACT = "exact"          # normalised basenames identical
     HIGH = "high"            # episode number + similar titles

@@ -58,25 +58,56 @@ def clean_title(name: str) -> str:
     return cleaned or Path(sanitize_filename(name)).stem
 
 
-_CODEC_LABEL = {
-    "libx264": "H264", "h264": "H264",
-    "libx265": "HEVC", "hevc": "HEVC",
-    "libsvtav1": "AV1", "libaom-av1": "AV1", "av1": "AV1",
-    "copy": "COPY",
+_LANG_TAGS = {
+    "fr": "VOSTFR", "fra": "VOSTFR", "fre": "VOSTFR",
+    "en": "VOSTEN", "eng": "VOSTEN",
+    "es": "VOSTES", "spa": "VOSTES",
+    "pt": "VOSTPT", "por": "VOSTPT",
+    "ar": "VOSTAR", "ara": "VOSTAR",
+    "de": "VOSTDE", "ger": "VOSTDE", "deu": "VOSTDE",
+    "it": "VOSTIT", "ita": "VOSTIT",
 }
 
 
-def build_output_name(source_name: str, *, height: int | None, codec: str,
-                      container: str, hardsub: bool = False) -> str:
-    title = clean_title(source_name).replace(" ", "_") or "video"
+def lang_tag(lang: str) -> str:
+    """Fansub-style language tag for a burned subtitle, e.g. fr → VOSTFR."""
+    lang = (lang or "").strip().lower()
+    if not lang or lang == "und":
+        return "VOSTFR"          # sensible default for this bot's audience
+    return _LANG_TAGS.get(lang, "VOST" + lang[:2].upper())
+
+
+def _title_part(raw_title: str) -> str:
+    """Tidy a title prefix into Title_Case_With_Underscores."""
+    s = _CLUTTER.sub(" ", raw_title)
+    s = re.sub(r"[._]+", " ", s)
+    s = re.sub(r"[^\w\s-]", " ", s, flags=re.UNICODE)
+    s = re.sub(r"\s{2,}", " ", s).strip(" -_")
+    return s.replace(" ", "_")
+
+
+def build_output_name(source_name: str, *, container: str = "mp4",
+                      hardsub: bool = False, sub_lang: str = "",
+                      height: int | None = None) -> str:
+    """Clean output name: ``Title_SxxExx_VOSTFR.mp4``.
+
+    Drops release-group junk, codec labels and source tags. Season/episode
+    become ``SxxExx`` (season assumed 01 when the release omits it, as anime
+    seasonal releases do). A hardsub adds the subtitle-language tag. Files with
+    no detectable episode fall back to ``Title_<height>p`` so they stay
+    distinct.
+    """
+    from bot.utils.matching import split_title_episode
+    raw_title, ep = split_title_episode(source_name)
+    title = _title_part(raw_title) or "video"
     parts = [title]
-    if height:
+    if ep:
+        season = ep.season if ep.season is not None else 1
+        parts.append(f"S{season:02d}E{ep.episode:02d}")
+    elif height:
         parts.append(f"{height}p")
-    label = _CODEC_LABEL.get(codec.lower(), codec.upper() if codec else "")
-    if label and label != "COPY":
-        parts.append(label)
     if hardsub:
-        parts.append("HARDSUB")
+        parts.append(lang_tag(sub_lang))
     name = sanitize_filename("_".join(p for p in parts if p))
     return f"{name}.{container.lstrip('.')}"
 
