@@ -343,19 +343,31 @@ async def spawn_seedr_children(rt: Runtime, parent: Job) -> int:
             continue
         m = matches[idx]
         has_sub = bool(m.get("sub_id"))
+        # Seedr episodes are hardsubbed by default: use the matched external
+        # subtitle if there is one, otherwise burn the video's own embedded
+        # subtitle (embedded_auto). The worker degrades to a plain encode only
+        # if the file genuinely has no text subtitle. Set no_subs in options
+        # to opt out.
+        want_subs = not parent.options.get("no_subs")
+        if not want_subs:
+            sub_mode, sub_source = "none", ""
+        elif has_sub:
+            sub_mode, sub_source = "hard", "seedr"
+        else:
+            sub_mode, sub_source = "hard", "embedded_auto"
         child = Job(
             id=new_job_id(),
             user_id=parent.user_id,
             chat_id=parent.chat_id,
-            kind=JobKind.HARDSUB if has_sub else JobKind.ENCODE,
+            kind=JobKind.HARDSUB if sub_mode == "hard" else JobKind.ENCODE,
             input_type=InputType.SEEDR_FILE,
             input_ref=str(m["video_id"]),
             input_name=str(m.get("video_label") or "episode.mkv"),
             input_size=int(m.get("video_size") or 0),
             options={
                 **inherited,
-                "subtitle_mode": "hard" if has_sub else "none",
-                "subtitle_source": "seedr" if has_sub else "",
+                "subtitle_mode": sub_mode,
+                "subtitle_source": sub_source,
             },
             seedr={
                 "folder_id": s.get("folder_id"),

@@ -398,14 +398,36 @@ async def _acquire_input(rt: Runtime, job: Job, work: Path,
 async def _prepare_subtitles(rt: Runtime, job: Job, media: MediaInfo,
                              input_path: Path, work: Path, plan: EncodePlan,
                              token: CancelToken) -> list[str]:
-    """Resolve the subtitle source into plan.subtitle_path (+fonts)."""
+    """Resolve the subtitle source into plan.subtitle_path (+fonts).
+
+    subtitle_source values:
+      embedded       — a specific embedded stream chosen in the wizard
+      embedded_auto  — pick the best embedded text stream (Seedr default);
+                       if none exists, degrade to a plain encode
+      upload/seedr/…  — an external subtitle file already on disk
+    """
     cfg = rt.config
     warnings: list[str] = []
     fps = media.main_video.fps if media.main_video else 23.976
     sub_source = str(job.options.get("subtitle_source", ""))
     raw_path: str = ""
 
-    if sub_source == "embedded":
+    if sub_source == "embedded_auto":
+        stream = _pick_embedded_sub(media, cfg.preferred_sub_lang)
+        if stream is None:
+            # Nothing burnable (no text subtitle) — encode without subs
+            # instead of failing the whole job.
+            plan.subtitle_mode = "none"
+            log.info("Job %s: no embedded text subtitle to burn — plain encode",
+                     job.id)
+            return ["No embedded text subtitle found — encoded without subtitles."]
+        log.info("Job %s: hardsubbing embedded stream #%d (%s)",
+                 job.id, stream.type_index, stream.language)
+        raw_path = await extract_text_subtitle(
+            str(input_path), stream, work / "subtitles",
+            ffmpeg=cfg.ffmpeg_path, cancel_token=token,
+        )
+    elif sub_source == "embedded":
         idx = int(job.options.get("subtitle_stream", 0))
         stream = next((s for s in media.subtitles if s.type_index == idx), None)
         if stream is None:
@@ -436,6 +458,25 @@ async def _prepare_subtitles(rt: Runtime, job: Job, media: MediaInfo,
         )
         warnings += missing_font_warnings(referenced, extracted, cfg.fallback_font)
     return warnings
+
+
+def _pick_embedded_sub(media: MediaInfo, preferred_lang: str = ""):
+    """Choose which embedded subtitle to burn: preferred language first, then
+    the default-disposition track, then the first text (non-bitmap) track.
+    Returns None if the file has no burnable text subtitle."""
+    text_subs = [s for s in media.subtitles if not s.is_bitmap]
+    if not text_subs:
+        return None
+    if preferred_lang:
+        want = preferred_lang.strip().lower()[:2]  # fr matches fr/fra/fre
+        if want:
+            for s in text_subs:
+                if s.language[:2] == want:
+                    return s
+    for s in text_subs:
+        if s.default:
+            return s
+    return text_subs[0]
 
 
 def _relpath_for_filter(path: Path, work: Path) -> str:

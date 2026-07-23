@@ -71,6 +71,10 @@ class Config:
     default_preset: str = "medium"
     default_resolution: str = "original"
     fallback_font: str = "Arial"
+    # Preferred embedded-subtitle language to burn when a Seedr video has no
+    # matched external subtitle (e.g. "fr" for VOSTFR releases). Empty = pick
+    # the default-disposition track, else the first text subtitle.
+    preferred_sub_lang: str = ""
 
     # Seedr
     seedr_username: str = ""
@@ -201,6 +205,7 @@ class Config:
             default_preset=opt("DEFAULT_PRESET", "medium"),
             default_resolution=opt("DEFAULT_RESOLUTION", "original"),
             fallback_font=opt("FALLBACK_FONT", "Arial"),
+            preferred_sub_lang=opt("PREFERRED_SUB_LANG", ""),
             seedr_username=seedr_user,
             seedr_password=seedr_pwd,
             seedr_proxy=seedr_proxy,
