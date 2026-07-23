@@ -20,8 +20,8 @@ echo "==> Installing system packages"
 sudo apt-get update -qq
 # build-essential + python3-dev provide gcc/headers for the TgCrypto C
 # extension (MTProto speedup); without them pip cannot build its wheel.
-sudo apt-get install -y -qq ffmpeg fonts-dejavu-core software-properties-common \
-    build-essential python3-dev
+sudo apt-get install -y -qq ffmpeg mediainfo fonts-dejavu-core \
+    software-properties-common build-essential python3-dev
 
 if ! command -v python3.12 >/dev/null 2>&1; then
     echo "==> Python 3.12 not found — adding deadsnakes PPA (Ubuntu 22.04)"

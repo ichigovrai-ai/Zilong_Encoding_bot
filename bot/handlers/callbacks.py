@@ -122,7 +122,7 @@ async def on_callback(_: Client, cb: CallbackQuery) -> None:
         return
 
     # ── Wizard steps ────────────────────────────────────────────────────
-    if data.verb in ("r", "c", "q", "s", "ss", "u", "bk"):
+    if data.verb in wizard.WIZARD_VERBS:
         text, kb, alert = await wizard.handle_selection(rt, job, data.verb,
                                                         data.arg)
         if alert:
@@ -211,13 +211,7 @@ async def _handle_setting(rt: Runtime, cb: CallbackQuery, arg: str) -> None:
 async def _handle_action(rt: Runtime, cb: CallbackQuery, job: Job,
                          action: str) -> None:
     if action == "minfo":
-        cached = job.options.get("mediainfo_html")
-        if cached:
-            await cb.answer()
-            await _edit(cb, cached)
-            if job.status == JobStatus.CREATED:
-                await rt.repo.transition(job.id, JobStatus.COMPLETED)
-            return
+        # Full analysis on the real file (MediaInfo CLI needs the whole file).
         await cb.answer("Downloading for full analysis…")
         await rt.repo.update_fields(job.id, kind=JobKind.MEDIAINFO)
         await _edit(cb, "🔎 Downloading for full analysis…",

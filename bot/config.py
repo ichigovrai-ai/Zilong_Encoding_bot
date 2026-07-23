@@ -50,6 +50,7 @@ class Config:
     # External binaries
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
+    mediainfo_path: str = "mediainfo"
     aria2c_path: str = ""
 
     # Concurrency / limits
@@ -183,6 +184,7 @@ class Config:
             session_dir=Path(opt("SESSION_DIR", "data")),
             ffmpeg_path=ffmpeg_path,
             ffprobe_path=ffprobe_path,
+            mediainfo_path=opt("MEDIAINFO_PATH", "mediainfo"),
             aria2c_path=opt("ARIA2C_PATH"),
             max_concurrent_encodes=int(num("MAX_CONCURRENT_ENCODES", 1, 1, 8)),
             max_concurrent_downloads=int(num("MAX_CONCURRENT_DOWNLOADS", 2, 1, 8)),

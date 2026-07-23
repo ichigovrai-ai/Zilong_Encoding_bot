@@ -3,7 +3,7 @@ FROM python:3.12-slim-bookworm
 # FFmpeg with libass (Debian's build includes libass, libx264, libx265,
 # libsvtav1, libopus and aac) + fonts for subtitle fallback rendering.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg fonts-dejavu-core fonts-noto-cjk aria2 \
+        ffmpeg mediainfo fonts-dejavu-core fonts-noto-cjk aria2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

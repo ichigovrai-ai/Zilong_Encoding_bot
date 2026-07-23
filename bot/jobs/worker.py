@@ -189,7 +189,12 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
     media = await probe_media(str(input_path), ffprobe=cfg.ffprobe_path)
 
     if job.kind == JobKind.MEDIAINFO:
-        await reporter.update(render_mediainfo(media, job.input_name), force=True)
+        from bot.services.mediainfo import mediainfo_cli_text, render_cli
+        cli = await mediainfo_cli_text(str(input_path),
+                                       binary=cfg.mediainfo_path)
+        text = (render_cli(cli, job.input_name) if cli
+                else render_mediainfo(media, job.input_name))
+        await reporter.update(text, force=True)
         await rt.repo.transition(job.id, JobStatus.COMPLETED)
         return
 

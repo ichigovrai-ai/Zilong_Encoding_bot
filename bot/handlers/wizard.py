@@ -21,6 +21,10 @@ from bot.utils.paths import create_job_dirs
 
 log = logging.getLogger(__name__)
 
+# Verbs handled by handle_selection(). The callback router dispatches exactly
+# these here — keep the two in sync via this single source of truth.
+WIZARD_VERBS = frozenset({"r", "c", "q", "s", "ss", "u", "au", "bk"})
+
 STEPS: dict[str, list[str]] = {
     JobKind.ENCODE: ["res", "codec", "qual", "subsrc", "confirm"],
     JobKind.COMPRESS: ["qual", "confirm"],

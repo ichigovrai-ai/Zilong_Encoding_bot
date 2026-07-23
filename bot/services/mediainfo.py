@@ -1,10 +1,48 @@
-"""Render MediaInfo as the /mediainfo report text (HTML for Telegram)."""
+"""Render MediaInfo as the /mediainfo report text (HTML for Telegram).
+
+Two renderers: the rich MediaInfo-CLI dump (matches the old Zilong bot, used
+when the `mediainfo` binary is installed) and a self-contained ffprobe panel
+used as a fallback.
+"""
 from __future__ import annotations
 
+import asyncio
+import logging
 from html import escape
 
 from bot.services.ffprobe import MediaInfo
 from bot.utils.timefmt import fmt_hms, human_size
+
+log = logging.getLogger(__name__)
+
+_TG_LIMIT = 3500  # leave headroom under Telegram's 4096-char message cap
+
+
+async def mediainfo_cli_text(path: str, *, binary: str = "mediainfo",
+                             timeout: float = 25.0) -> str | None:
+    """Full MediaInfo CLI report, ready to wrap in <pre>. None if the binary
+    is missing, times out, or produces nothing useful."""
+    from bot.utils.subprocesses import run_process
+    try:
+        code, out, _ = await run_process([binary, str(path)], timeout=timeout)
+    except FileNotFoundError:
+        log.info("mediainfo binary not found (%s) — using ffprobe fallback", binary)
+        return None
+    except asyncio.TimeoutError:
+        log.warning("mediainfo timed out on %s", path)
+        return None
+    if code != 0:
+        return None
+    text = out.decode("utf-8", errors="replace").strip()
+    return text if len(text) > 80 else None
+
+
+def render_cli(text: str, filename: str) -> str:
+    """Wrap raw MediaInfo output as a Telegram HTML message."""
+    body = text
+    if len(body) > _TG_LIMIT:
+        body = body[:_TG_LIMIT].rsplit("\n", 1)[0] + "\n… (truncated)"
+    return f"📋 <b>Media information</b>\n<pre>{escape(body)}</pre>"
 
 
 def _kbps(bps: int) -> str:

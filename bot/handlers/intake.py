@@ -148,16 +148,12 @@ async def intake_media(rt: Runtime, message: Any, *,
     if stored is None:
         return
     if preset_kind == JobKind.MEDIAINFO:
-        cached = stored.options.get("mediainfo_html")
-        if cached:
-            from bot.jobs.states import JobStatus
-            await sent.edit_text(cached, parse_mode=enums.ParseMode.HTML)
-            await rt.repo.transition(stored.id, JobStatus.COMPLETED)
-        else:
-            await sent.edit_text("🔎 Downloading for full analysis…",
-                                 parse_mode=enums.ParseMode.HTML,
-                                 reply_markup=keyboards.cancel_only(stored.id))
-            await rt.manager.enqueue(stored.id)
+        # Always run the full MediaInfo analysis on the real file (the quick
+        # 12 MB header probe can't produce the detailed CLI report).
+        await sent.edit_text("🔎 Downloading for full analysis…",
+                             parse_mode=enums.ParseMode.HTML,
+                             reply_markup=keyboards.cancel_only(stored.id))
+        await rt.manager.enqueue(stored.id)
         return
     if preset_kind == JobKind.EXTRACT:
         p = stored.options.get("probe") or {}
