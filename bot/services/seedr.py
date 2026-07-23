@@ -212,9 +212,18 @@ class SeedrClient:
     # ── Listing ─────────────────────────────────────────────────────────
 
     async def list_folder(self, folder_id: int = 0) -> SeedrListing:
-        body = self._normalise(await self._call("list_contents",
-                                                folder_id=str(folder_id)))
-        return body
+        # Seedr's resource.php ignores `folder_id` for anything but the root:
+        # to list a SUBFOLDER you must pass content_type=folder + content_id,
+        # otherwise it silently returns the root listing. This matters because
+        # a single-file torrent appears as a root folder whose name is the
+        # filename, with the actual video one level inside — so drilling in is
+        # required to ever find it.
+        if folder_id and int(folder_id) != 0:
+            raw = await self._call("list_contents", content_type="folder",
+                                   content_id=str(folder_id))
+        else:
+            raw = await self._call("list_contents", folder_id="0")
+        return self._normalise(raw)
 
     @staticmethod
     def _normalise(raw: dict) -> SeedrListing:
@@ -400,14 +409,15 @@ class SeedrClient:
         gone_polls = 0
         candidate: tuple[int, Any, int] | None = None  # (id, signature, stable_polls)
 
-        def _match_folder(folders: list[SeedrFolderInfo],
-                          torrent_name: str) -> SeedrFolderInfo | None:
+        def _match_folder(folders: list[SeedrFolderInfo], torrent_name: str,
+                          *, include_known: bool = False) -> SeedrFolderInfo | None:
             tkey = _name_key(torrent_name or name_hint)
             if not tkey:
                 return None
             matches = [
                 f for f in folders
-                if f.id not in known_folder_ids and (fkey := _name_key(f.name)) and (
+                if (include_known or f.id not in known_folder_ids)
+                and (fkey := _name_key(f.name)) and (
                     fkey == tkey
                     or (min(len(fkey), len(tkey)) >= 8
                         and (fkey in tkey or tkey in fkey))
@@ -461,8 +471,13 @@ class SeedrClient:
                         candidate = None
             else:
                 # Torrent vanished from the transfer list → either finished
-                # (folder exists) or failed/removed.
-                folder = _match_folder(root.folders, name_hint)
+                # (folder exists) or failed/removed. Prefer a newly-created
+                # folder; fall back to a name-matched pre-existing folder,
+                # which covers a cached torrent Seedr completes instantly
+                # without making a new folder (re-sending the same magnet).
+                folder = (_match_folder(root.folders, name_hint)
+                          or _match_folder(root.folders, name_hint,
+                                           include_known=True))
                 if folder:
                     if progress_cb:
                         await progress_cb(100.0, folder.name)

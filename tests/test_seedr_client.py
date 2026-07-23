@@ -1,6 +1,8 @@
 """Seedr response normalisation and magnet-name matching (pure parts)."""
 from __future__ import annotations
 
+import pytest
+
 from bot.services.seedr import SeedrClient, _name_key
 
 
@@ -60,3 +62,53 @@ def test_proxy_without_credentials():
 def test_no_proxy():
     c = SeedrClient("u", "p")
     assert c._proxy is None and c._proxy_auth is None   # aiohttp wants None
+
+
+class _FakeResp:
+    status = 200
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    async def json(self, content_type=None):
+        return self._payload
+
+
+class _FakeSession:
+    """Records the form data of each resource.php POST."""
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def post(self, url, proxy=None, proxy_auth=None, data=None):
+        self.calls.append(dict(data or {}))
+        # OAuth token call vs resource.php call
+        if "token" in url:
+            return _FakeResp({"access_token": "tok"})
+        return _FakeResp({"id": data.get("content_id") or data.get("folder_id"),
+                          "files": [], "folders": []})
+
+
+@pytest.mark.asyncio
+async def test_list_folder_uses_content_id_for_subfolders():
+    # Regression: Seedr ignores folder_id for subfolders — a subfolder MUST be
+    # listed with content_type=folder + content_id, or it returns root and the
+    # video inside a single-file torrent is never found.
+    sess = _FakeSession()
+    c = SeedrClient("u", "p", session=sess)
+    await c.list_folder(0)
+    await c.list_folder(1428982481)
+    listing_calls = [c for c in sess.calls if c.get("func") == "list_contents"]
+    root_call, sub_call = listing_calls[0], listing_calls[1]
+    assert root_call.get("folder_id") == "0"
+    assert sub_call.get("content_type") == "folder"
+    assert sub_call.get("content_id") == "1428982481"
+    assert "folder_id" not in sub_call
