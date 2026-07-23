@@ -52,9 +52,13 @@ SETTINGS: tuple[Setting, ...] = (
             "original", _res),
     Setting("def_codec", "🎯 Codec", ("x264", "x265", "av1"), "x264", _CODEC.get),
     Setting("def_crf", "🎛 CRF", ("18", "20", "22", "23", "24", "26", "28"), "23", str),
+    # Default veryfast: at a fixed CRF, faster presets keep the same visual
+    # quality and just make slightly larger files, so this is ~3× faster than
+    # medium with no real quality loss. Dial toward slow for smaller files.
     Setting("def_preset", "⏩ Preset",
-            ("ultrafast", "veryfast", "fast", "medium", "slow", "slower"),
-            "medium", str),
+            ("ultrafast", "superfast", "veryfast", "faster", "fast",
+             "medium", "slow", "slower"),
+            "veryfast", str),
     Setting("def_audio", "🔊 Audio", ("aac", "opus", "copy"), "aac", _AUDIO.get),
 )
 

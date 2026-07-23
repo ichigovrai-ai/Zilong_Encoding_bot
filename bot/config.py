@@ -68,7 +68,7 @@ class Config:
     default_video_codec: str = "libx264"
     default_audio_codec: str = "aac"
     default_crf: int = 23
-    default_preset: str = "medium"
+    default_preset: str = "veryfast"
     default_resolution: str = "original"
     fallback_font: str = "Arial"
     # Preferred embedded-subtitle language to burn when a Seedr video has no
@@ -202,7 +202,7 @@ class Config:
             default_video_codec=opt("DEFAULT_VIDEO_CODEC", "libx264"),
             default_audio_codec=opt("DEFAULT_AUDIO_CODEC", "aac"),
             default_crf=int(num("DEFAULT_CRF", 23, 0, 51)),
-            default_preset=opt("DEFAULT_PRESET", "medium"),
+            default_preset=opt("DEFAULT_PRESET", "veryfast"),
             default_resolution=opt("DEFAULT_RESOLUTION", "original"),
             fallback_font=opt("FALLBACK_FONT", "Arial"),
             preferred_sub_lang=opt("PREFERRED_SUB_LANG", ""),
