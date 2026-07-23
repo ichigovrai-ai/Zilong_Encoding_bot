@@ -100,7 +100,8 @@ async def run() -> None:
     if cfg.seedr_enabled:
         from bot.services.seedr import SeedrClient
         try:
-            async with SeedrClient(cfg.seedr_username, cfg.seedr_password) as sc:
+            async with SeedrClient(cfg.seedr_username, cfg.seedr_password,
+                                   proxy=cfg.seedr_proxy) as sc:
                 ok = await sc.check_credentials()
             log.info("Seedr credentials: %s", "OK" if ok else "INVALID")
         except Exception as exc:  # noqa: BLE001

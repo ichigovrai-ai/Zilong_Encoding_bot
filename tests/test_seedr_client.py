@@ -40,3 +40,10 @@ def test_normalise_skips_broken_rows():
 def test_name_key_normalisation():
     assert _name_key("Show.Name S01 [1080p]") == _name_key("show name-s01 1080P")
     assert _name_key("") == ""
+
+
+def test_proxy_stored_and_optional():
+    c1 = SeedrClient("u", "p", proxy="http://user:pass@host:6540")
+    assert c1._proxy == "http://user:pass@host:6540"
+    c2 = SeedrClient("u", "p")
+    assert c2._proxy is None       # aiohttp expects None, not ""

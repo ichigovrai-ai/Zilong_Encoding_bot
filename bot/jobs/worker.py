@@ -365,7 +365,8 @@ async def _acquire_input(rt: Runtime, job: Job, work: Path,
         )
 
     if job.input_type == InputType.SEEDR_FILE:
-        async with SeedrClient(cfg.seedr_username, cfg.seedr_password) as sc:
+        async with SeedrClient(cfg.seedr_username, cfg.seedr_password,
+                               proxy=cfg.seedr_proxy) as sc:
             url = await sc.fetch_file_url(int(job.input_ref))
             path = await download_url(
                 url, dest, max_bytes=cfg.max_input_size,
@@ -553,7 +554,8 @@ async def _run_seedr_parent(rt: Runtime, job: Job, token: CancelToken,
         reply_markup=keyboards.cancel_only(job.id), force=True,
     )
 
-    async with SeedrClient(cfg.seedr_username, cfg.seedr_password) as sc:
+    async with SeedrClient(cfg.seedr_username, cfg.seedr_password,
+                               proxy=cfg.seedr_proxy) as sc:
         known = {f.id for f in (await sc.list_folder(0)).folders}
         torrent_id = await sc.add_magnet(job.input_ref)
 
@@ -655,7 +657,8 @@ async def _maybe_delete_seedr_folder(rt: Runtime, job_id: str) -> None:
     )
     if row and row["n"] == 0:
         try:
-            async with SeedrClient(cfg.seedr_username, cfg.seedr_password) as sc:
+            async with SeedrClient(cfg.seedr_username, cfg.seedr_password,
+                               proxy=cfg.seedr_proxy) as sc:
                 await sc.delete_folder(folder_id)
             log.info("Deleted Seedr folder %d after job %s", folder_id, job_id)
         except SeedrError as exc:

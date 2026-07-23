@@ -27,7 +27,8 @@ async def cmd_seedr(_: Client, message: Message) -> None:
     status = await message.reply_text("🌱 Checking Seedr…")
     try:
         async with SeedrClient(rt.config.seedr_username,
-                               rt.config.seedr_password) as sc:
+                               rt.config.seedr_password,
+                               proxy=rt.config.seedr_proxy) as sc:
             total, used = await sc.storage()
             listing = await sc.list_folder(0)
     except SeedrError as exc:

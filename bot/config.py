@@ -71,6 +71,10 @@ class Config:
     # Seedr
     seedr_username: str = ""
     seedr_password: str = ""
+    # HTTP proxy for Seedr API calls. Needed on datacenter IPs (EC2, Colab,
+    # Render …) because Seedr blocks add_torrent from those ranges while
+    # read-only calls still work. CDN downloads never use the proxy.
+    seedr_proxy: str = ""
     seedr_auto_delete: bool = True
     seedr_poll_interval: float = 10.0
     seedr_timeout_hours: float = 4.0
@@ -142,6 +146,10 @@ class Config:
         seedr_pwd = opt("SEEDR_PASSWORD")
         if bool(seedr_user) != bool(seedr_pwd):
             errors.append("SEEDR_USERNAME and SEEDR_PASSWORD must be set together")
+        seedr_proxy = opt("SEEDR_PROXY")
+        if seedr_proxy and not seedr_proxy.startswith(("http://", "https://")):
+            errors.append("SEEDR_PROXY must be an http(s):// proxy URL "
+                          "(SOCKS is not supported)")
 
         ffmpeg_path = opt("FFMPEG_PATH", "ffmpeg")
         ffprobe_path = opt("FFPROBE_PATH", "ffprobe")
@@ -154,7 +162,8 @@ class Config:
                 "Configuration invalid:\n  - " + "\n  - ".join(errors)
             )
 
-        secrets = tuple(s for s in (bot_token, api_hash, seedr_pwd) if s)
+        secrets = tuple(s for s in (bot_token, api_hash, seedr_pwd,
+                                    seedr_proxy) if s)
 
         cfg = cls(
             api_id=api_id,
@@ -187,6 +196,7 @@ class Config:
             fallback_font=opt("FALLBACK_FONT", "Arial"),
             seedr_username=seedr_user,
             seedr_password=seedr_pwd,
+            seedr_proxy=seedr_proxy,
             seedr_auto_delete=opt("SEEDR_AUTO_DELETE", "1").lower() in ("1", "true", "yes"),
             seedr_poll_interval=num("SEEDR_POLL_INTERVAL", 10.0, 3.0, 120.0),
             seedr_timeout_hours=num("SEEDR_TIMEOUT_HOURS", 4.0, 0.1, 24.0),

@@ -90,11 +90,17 @@ def _name_key(value: str) -> str:
 
 class SeedrClient:
     def __init__(self, username: str, password: str,
-                 session: aiohttp.ClientSession | None = None):
+                 session: aiohttp.ClientSession | None = None,
+                 proxy: str = ""):
         self._username = username
         self._password = password
         self._session = session
         self._own_session = session is None
+        # HTTP proxy for API calls only (OAuth + resource.php). Seedr blocks
+        # add_torrent from datacenter IP ranges (EC2, Colab, …) while
+        # read-only calls work; CDN downloads happen elsewhere and never
+        # go through the proxy.
+        self._proxy = proxy or None
         self._token = ""
         self._token_lock = asyncio.Lock()
 
@@ -127,7 +133,7 @@ class SeedrClient:
             if self._token and not force:
                 return self._token
             try:
-                async with self.session.post(_OAUTH_URL, data={
+                async with self.session.post(_OAUTH_URL, proxy=self._proxy, data={
                     "grant_type": "password",
                     "client_id": _CLIENT_ID,
                     "username": self._username,
@@ -149,7 +155,8 @@ class SeedrClient:
         token = await self._get_token()
         data = {"access_token": token, "func": func, **params}
         try:
-            async with self.session.post(_RESOURCE_URL, data=data) as resp:
+            async with self.session.post(_RESOURCE_URL, proxy=self._proxy,
+                                         data=data) as resp:
                 if resp.status in (401, 403) and retry_auth:
                     await self._get_token(force=True)
                     return await self._call(func, retry_auth=False, **params)
