@@ -18,7 +18,10 @@ cd "$APP_DIR"
 
 echo "==> Installing system packages"
 sudo apt-get update -qq
-sudo apt-get install -y -qq ffmpeg fonts-dejavu-core software-properties-common
+# build-essential + python3-dev provide gcc/headers for the TgCrypto C
+# extension (MTProto speedup); without them pip cannot build its wheel.
+sudo apt-get install -y -qq ffmpeg fonts-dejavu-core software-properties-common \
+    build-essential python3-dev
 
 if ! command -v python3.12 >/dev/null 2>&1; then
     echo "==> Python 3.12 not found — adding deadsnakes PPA (Ubuntu 22.04)"
@@ -31,9 +34,16 @@ fi
 
 echo "==> FFmpeg build check"
 ffmpeg -version | head -1
-ffmpeg -hide_banner -filters 2>/dev/null | grep -q " subtitles " \
-    && echo "    libass/subtitles filter: OK" \
-    || { echo "    ERROR: FFmpeg has no subtitles filter (libass)"; exit 1; }
+# Capture first: piping into `grep -q` under pipefail turns grep's early
+# exit into a spurious SIGPIPE failure. Some builds also print the filter
+# list to stderr, so merge streams.
+FILTERS="$(ffmpeg -hide_banner -filters 2>&1 || true)"
+if grep -q " subtitles " <<<"$FILTERS"; then
+    echo "    libass/subtitles filter: OK"
+else
+    echo "    ERROR: FFmpeg has no subtitles filter (libass)"
+    exit 1
+fi
 
 echo "==> Creating venv + installing dependencies"
 python3.12 -m venv .venv
