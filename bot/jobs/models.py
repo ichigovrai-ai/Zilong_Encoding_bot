@@ -35,6 +35,7 @@ class JobKind:
     SEEDR_HARDSUB = "seedr_hardsub"
     EXTRACT = "extract"
     MEDIAINFO = "mediainfo"
+    CONVERTSUB = "convertsub"
 
 
 @dataclass(slots=True)

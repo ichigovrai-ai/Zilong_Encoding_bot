@@ -17,10 +17,11 @@ PREFIX = "z"
 #   x  = cancel job               e  = toggle episode    ea = toggle all episodes
 #   fx = fix episode's subtitle   fs = pick subtitle for episode
 #   st = user setting toggle (no job id)
-#   n  = noop (decorative button)
+#   au = audio codec              cv = convert subtitle to format
+#   rt = retry failed job         n  = noop (decorative button)
 VALID_VERBS = frozenset({
     "a", "r", "c", "q", "s", "ss", "u", "go", "bk", "x",
-    "e", "ea", "fx", "fs", "st", "n",
+    "e", "ea", "fx", "fs", "st", "au", "cv", "rt", "n",
 })
 
 

@@ -74,3 +74,18 @@ def test_parse_rejects_garbage():
 def test_pack_length_guard():
     with pytest.raises(ValueError):
         Callback("fs", "abc12345", "x" * 60).pack()
+
+
+def test_new_verbs_roundtrip():
+    for verb, arg in (("au", "opus"), ("cv", "ass"), ("rt", ""),
+                      ("st", "style")):
+        job = "" if verb == "st" else "abc12345"
+        assert parse(pack(verb, job, arg)) == Callback(verb, job, arg)
+
+
+def test_convert_wizard_has_audio_step():
+    from bot.handlers.wizard import STEPS
+    from bot.jobs.models import JobKind
+    assert "aud" in STEPS[JobKind.CONVERT]
+    assert STEPS[JobKind.CONVERT].index("aud") < \
+        STEPS[JobKind.CONVERT].index("confirm")

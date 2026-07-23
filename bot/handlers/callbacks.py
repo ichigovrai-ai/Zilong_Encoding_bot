@@ -60,8 +60,32 @@ async def on_callback(_: Client, cb: CallbackQuery) -> None:
                             f"<code>{job.input_name[:50]}</code>")
         return
 
+    # ── Retry (only valid on a terminal FAILED job) ─────────────────────
+    if data.verb == "rt":
+        if job.status != JobStatus.FAILED:
+            await cb.answer("Only failed jobs can be retried.", show_alert=True)
+            return
+        if job.kind == JobKind.CONVERTSUB:
+            await cb.answer("Send the subtitle file again to retry.",
+                            show_alert=True)
+            return
+        await rt.repo.update_fields(job.id, error="", progress=0.0,
+                                    cleaned=False, cancel_requested=False,
+                                    output_path="")
+        await rt.manager.enqueue(job.id)
+        await cb.answer("Retrying…")
+        await _edit(cb, "🔁 <b>QUEUED AGAIN</b>\n"
+                        f"📄 <code>{job.input_name[:50]}</code>",
+                    keyboards.cancel_only(job.id))
+        return
+
     if job.status in TERMINAL:
         await cb.answer("This job is already finished.", show_alert=True)
+        return
+
+    # ── Standalone subtitle conversion ──────────────────────────────────
+    if data.verb == "cv":
+        await _handle_convertsub(rt, cb, job, data.arg)
         return
 
     # ── Seedr episode selection ─────────────────────────────────────────
@@ -109,6 +133,44 @@ async def on_callback(_: Client, cb: CallbackQuery) -> None:
         return
 
     await cb.answer()
+
+
+async def _handle_convertsub(rt: Runtime, cb: CallbackQuery, job: Job,
+                             target: str) -> None:
+    """Convert an uploaded subtitle file and send it back as a document."""
+    from pathlib import Path
+
+    from bot.services.extraction import ExtractionError, convert_subtitle_format
+    from bot.services.subtitles import SubtitleError
+
+    if target not in ("srt", "ass", "vtt") or job.kind != JobKind.CONVERTSUB:
+        await cb.answer("Unknown conversion.", show_alert=True)
+        return
+    raw = str(job.options.get("subtitle_file", ""))
+    if not raw or not Path(raw).exists():
+        await cb.answer("The file is gone — send it again.", show_alert=True)
+        return
+    await cb.answer("Converting…")
+    try:
+        out = await convert_subtitle_format(
+            raw, target, Path(job.work_dir) / "output",
+            output_stem=Path(job.input_name).stem,
+            ffmpeg=rt.config.ffmpeg_path,
+        )
+        await rt.client.send_document(
+            job.chat_id, out,
+            caption=f"💬 {Path(job.input_name).name} → <b>{target.upper()}</b>",
+            parse_mode=enums.ParseMode.HTML,
+        )
+        await rt.repo.transition(job.id, JobStatus.COMPLETED)
+        await _edit(cb, f"✅ <b>CONVERTED</b> → {target.upper()}\n"
+                        f"📄 <code>{job.input_name[:50]}</code>")
+    except (SubtitleError, ExtractionError) as exc:
+        await rt.repo.transition(job.id, JobStatus.FAILED, error=str(exc))
+        await _edit(cb, f"❌ <b>Conversion failed</b>\n⚠️ {exc}")
+    finally:
+        from bot.services.cleanup import cleanup_job_dir
+        await cleanup_job_dir(rt.repo, rt.config.work_dir, job.id)
 
 
 async def _handle_setting(rt: Runtime, cb: CallbackQuery, arg: str) -> None:

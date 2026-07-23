@@ -82,6 +82,16 @@ def quality_menu(job_id: str) -> InlineKeyboardMarkup:
         [_btn("💎 High quality", "q", job_id, "high")],
         [_btn("🎛 Custom CRF…", "q", job_id, "crf"),
          _btn("🎯 Target size…", "q", job_id, "size")],
+        [_btn("📶 Custom bitrate…", "q", job_id, "br")],
+        _nav_row(job_id),
+    ])
+
+
+def audio_menu(job_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [_btn("🔊 AAC", "au", job_id, "aac"),
+         _btn("🎼 Opus", "au", job_id, "opus")],
+        [_btn("📋 Copy audio", "au", job_id, "copy")],
         _nav_row(job_id),
     ])
 
@@ -124,6 +134,19 @@ def confirm_menu(job_id: str) -> InlineKeyboardMarkup:
 
 def cancel_only(job_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[_btn("✖️ Cancel", "x", job_id)]])
+
+
+def retry_menu(job_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[_btn("🔁 Retry", "rt", job_id)]])
+
+
+def convertsub_menu(job_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [_btn("➡️ To SRT", "cv", job_id, "srt"),
+         _btn("➡️ To ASS", "cv", job_id, "ass")],
+        [_btn("➡️ To VTT", "cv", job_id, "vtt")],
+        [_btn("✖️ Cancel", "x", job_id)],
+    ])
 
 
 def untimed_txt_menu(job_id: str) -> InlineKeyboardMarkup:

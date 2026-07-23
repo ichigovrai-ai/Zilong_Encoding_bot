@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 STEPS: dict[str, list[str]] = {
     JobKind.ENCODE: ["res", "codec", "qual", "subsrc", "confirm"],
     JobKind.COMPRESS: ["qual", "confirm"],
-    JobKind.CONVERT: ["res", "codec", "qual", "confirm"],
+    JobKind.CONVERT: ["res", "codec", "qual", "aud", "confirm"],
     JobKind.HARDSUB: ["subsrc", "res", "codec", "qual", "confirm"],
     # Seedr parent continues into this after episode selection:
     JobKind.SEEDR_HARDSUB: ["res", "codec", "qual", "confirm"],
@@ -106,6 +106,8 @@ def render(job: Job) -> tuple[str, Any]:
             keyboards.codec_menu(jid, bool(job.options.get("av1_ok")))
     if step == "qual":
         return header + "Choose the quality mode:", keyboards.quality_menu(jid)
+    if step == "aud":
+        return header + "Choose the audio codec:", keyboards.audio_menu(jid)
     if step == "subsrc":
         return header + "Subtitles:", \
             keyboards.subtitle_menu(jid, has_embedded_subs(job))
@@ -184,8 +186,20 @@ async def handle_selection(
             await _save(rt, job)
             return ("Send the target size in MB, e.g. <code>250</code>.",
                     keyboards.cancel_only(job.id), None)
+        elif arg == "br":
+            o["await"] = "bitrate"
+            await _save(rt, job)
+            return ("Send the video bitrate in kbps, e.g. <code>2500</code>.",
+                    keyboards.cancel_only(job.id), None)
         else:
             alert = "Unknown quality option."
+
+    elif verb == "au":
+        if arg in ("aac", "opus", "copy"):
+            o["audio"] = arg
+            advance(job)
+        else:
+            alert = "Unknown audio option."
 
     elif verb == "s":
         if arg == "none":
@@ -258,7 +272,8 @@ async def apply_awaited_text(rt: Runtime, job: Job, text: str) -> tuple[str, Any
     """Custom CRF / target size / resolution typed by the user.
     Raises ValidationError with a user-facing message on bad input."""
     from bot.utils.validation import (
-        validate_crf, validate_custom_resolution, validate_target_size_mb,
+        validate_bitrate_kbps, validate_crf, validate_custom_resolution,
+        validate_target_size_mb,
     )
     o = job.options
     awaited = o.get("await")
@@ -269,6 +284,10 @@ async def apply_awaited_text(rt: Runtime, job: Job, text: str) -> tuple[str, Any
     elif awaited == "size":
         o["target_size_mb"] = validate_target_size_mb(text.strip())
         o["quality"] = "size"
+        advance(job)
+    elif awaited == "bitrate":
+        o["video_bitrate"] = validate_bitrate_kbps(text.strip())
+        o["quality"] = "bitrate"
         advance(job)
     elif awaited == "res":
         result = validate_custom_resolution(text.strip())

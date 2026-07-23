@@ -107,7 +107,9 @@ Seedr password and signed Seedr URLs in every log record.
 /hardsub              — burn subtitles into a video
 /seedr                — Seedr account, storage, transfers, folders
 /mediainfo            — full stream report
-/extract /extractsub /extractaudio /convertsub
+/extract /extractsub /extractaudio
+/convertsub           — convert a subtitle file (SRT ⇄ ASS ⇄ VTT); also
+                        triggered by sending a lone subtitle file
 /presets /settings    — presets and current defaults
 /queue /status        — job queue and bot status
 /cancel [job id]      — cancel a job safely at any stage
@@ -149,6 +151,12 @@ rate-limited, FloodWait-tolerant):
   `Blocks` (█░) and `Accent` (━╌). /settings also toggles upload mode
   (🤖 auto / 🎬 video / 📁 document), stored per user in SQLite.
 - ETA is only shown when it can actually be computed — never faked.
+- Failed jobs show a **🔁 Retry** button that re-queues the same job (same
+  source, same settings) — valid because Telegram file ids, URLs and Seedr
+  file ids all survive the failure.
+
+Quality modes now include **📶 Custom bitrate**, and the `/convert` wizard
+has an explicit **audio step** (🔊 AAC / 🎼 Opus / 📋 copy).
 
 ## Architecture
 

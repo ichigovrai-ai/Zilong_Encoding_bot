@@ -65,6 +65,44 @@ async def extract_audio(
     return str(out)
 
 
+async def convert_subtitle_format(
+    raw_path: str, target: str, out_dir: str | Path, *,
+    output_stem: str = "subtitle", fps: float = 23.976,
+    ffmpeg: str = "ffmpeg", cancel_token: CancelToken | None = None,
+) -> str:
+    """Convert any supported subtitle file to srt/ass/vtt.
+
+    The input goes through the normal preparation pipeline first (encoding
+    detection, content-based format sniffing, MicroDVD/LRC conversion,
+    validation) so a mislabeled .txt converts just as well as a real .srt.
+    Raises SubtitleError/UntimedSubtitleError from preparation, or
+    ExtractionError if FFmpeg cannot produce the target.
+    """
+    from bot.services.subtitles import prepare_subtitle_file
+    from bot.utils.filenames import sanitize_filename
+
+    if target not in ("srt", "ass", "vtt"):
+        raise ExtractionError(f"Unsupported target subtitle format: {target}")
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prepared = prepare_subtitle_file(raw_path, out_dir, fps=fps)
+
+    out = out_dir / sanitize_filename(f"{output_stem}.{target}")
+    if prepared.format.value == target:
+        Path(prepared.path).replace(out)
+        return str(out)
+    args = [ffmpeg, "-hide_banner", "-y", "-i", prepared.path,
+            "-c:s", {"srt": "srt", "ass": "ass", "vtt": "webvtt"}[target],
+            str(out)]
+    code, _, err = await run_process(args, timeout=120, cancel_token=cancel_token)
+    if code != 0 or not out.exists() or out.stat().st_size == 0:
+        raise ExtractionError(
+            f"Subtitle conversion to {target.upper()} failed: "
+            f"{tail_text(err, 300)}"
+        )
+    return str(out)
+
+
 def describe_subtitle_streams(media: MediaInfo) -> list[str]:
     """Human-readable one-liners for the embedded-subtitle picker."""
     lines = []

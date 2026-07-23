@@ -29,7 +29,8 @@ async def on_text(_: Client, message: Message) -> None:
 
     # 1) Wizard waiting for a typed value?
     job = await rt.repo.awaiting_job_for_user(message.from_user.id)
-    if job is not None and job.options.get("await") in ("crf", "size", "res"):
+    if job is not None and job.options.get("await") in ("crf", "size", "res",
+                                                        "bitrate"):
         try:
             wtext, kb = await wizard.apply_awaited_text(rt, job, text)
         except ValidationError as exc:

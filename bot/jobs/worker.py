@@ -126,6 +126,7 @@ async def _finalise(rt: Runtime, job_id: str, reporter: ProgressReporter,
                     panels.error_panel(filename=job.input_name,
                                        error=job.error or error,
                                        job_id=job.id),
+                    reply_markup=keyboards.retry_menu(job.id),
                     force=True,
                 )
             elif status == JobStatus.CANCELLED:

@@ -90,9 +90,14 @@ def wizard_header(job: Job) -> str:
             parts.append(f"🎛 CRF {o['crf']}")
         elif q == "size" and o.get("target_size_mb"):
             parts.append(f"🎯 {o['target_size_mb']} MB")
+        elif q == "bitrate" and o.get("video_bitrate"):
+            parts.append(f"📶 {o['video_bitrate']} kbps")
         else:
             parts.append({"small": "🤏 small", "bal": "⚖️ balanced",
                           "high": "💎 high"}.get(q, q))
+    if o.get("audio"):
+        parts.append({"aac": "🔊 AAC", "opus": "🎼 Opus",
+                      "copy": "📋 audio copy"}.get(o["audio"], o["audio"]))
     if o.get("subtitle_mode") and o["subtitle_mode"] != "none":
         parts.append({"hard": "🔥 hardsub", "soft": "📎 soft subs"}.get(
             o["subtitle_mode"], o["subtitle_mode"]))
