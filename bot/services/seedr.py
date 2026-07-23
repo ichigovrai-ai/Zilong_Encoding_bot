@@ -195,6 +195,19 @@ class SeedrClient:
                 resp.raise_for_status()
                 body = await resp.json(content_type=None)
         except aiohttp.ClientResponseError as exc:
+            if func == "add_torrent" and exc.status in (413, 507):
+                raise SeedrQuotaError(
+                    "Seedr wouldn't accept this torrent. On a free Seedr "
+                    "account this usually means a plan limit was hit — free "
+                    "accounts allow only one active torrent at a time and cap "
+                    "torrent size. Let the current transfer finish (or remove a "
+                    "stuck one in the Seedr dashboard), free up space, or use a "
+                    "premium account."
+                ) from exc
+            if exc.status == 429:
+                raise SeedrError(
+                    "Seedr is rate-limiting requests — wait a moment and retry."
+                ) from exc
             raise SeedrError(f"Seedr API error ({func}): HTTP {exc.status}") from exc
         except aiohttp.ClientError as exc:
             raise SeedrError(f"Seedr API unreachable ({func}): {exc}") from exc
