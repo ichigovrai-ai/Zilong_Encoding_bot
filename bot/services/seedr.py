@@ -88,6 +88,29 @@ def _name_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
 
 
+def _split_proxy(proxy: str) -> tuple[str | None, "aiohttp.BasicAuth | None"]:
+    """Split a proxy URL into (url_without_userinfo, BasicAuth|None).
+
+    aiohttp ignores credentials embedded in the proxy URL, so they must be
+    supplied via proxy_auth. Returns (None, None) when no proxy is set.
+    """
+    if not proxy:
+        return None, None
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(proxy)
+    if not parts.username:
+        return proxy, None
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    clean = urlunsplit((parts.scheme, netloc, parts.path,
+                        parts.query, parts.fragment))
+    from urllib.parse import unquote
+    auth = aiohttp.BasicAuth(unquote(parts.username),
+                             unquote(parts.password or ""))
+    return clean, auth
+
+
 class SeedrClient:
     def __init__(self, username: str, password: str,
                  session: aiohttp.ClientSession | None = None,
@@ -100,7 +123,11 @@ class SeedrClient:
         # add_torrent from datacenter IP ranges (EC2, Colab, …) while
         # read-only calls work; CDN downloads happen elsewhere and never
         # go through the proxy.
-        self._proxy = proxy or None
+        #
+        # aiohttp does NOT read `user:pass@` credentials out of the proxy URL
+        # — that must be passed separately as proxy_auth, or the proxy answers
+        # 407. Split the userinfo off here so every request can supply it.
+        self._proxy, self._proxy_auth = _split_proxy(proxy)
         self._token = ""
         self._token_lock = asyncio.Lock()
 
@@ -133,12 +160,15 @@ class SeedrClient:
             if self._token and not force:
                 return self._token
             try:
-                async with self.session.post(_OAUTH_URL, proxy=self._proxy, data={
-                    "grant_type": "password",
-                    "client_id": _CLIENT_ID,
-                    "username": self._username,
-                    "password": self._password,
-                }) as resp:
+                async with self.session.post(
+                    _OAUTH_URL, proxy=self._proxy, proxy_auth=self._proxy_auth,
+                    data={
+                        "grant_type": "password",
+                        "client_id": _CLIENT_ID,
+                        "username": self._username,
+                        "password": self._password,
+                    },
+                ) as resp:
                     body = await resp.json(content_type=None)
             except aiohttp.ClientError as exc:
                 raise SeedrError(f"Seedr is unreachable: {exc}") from exc
@@ -155,8 +185,10 @@ class SeedrClient:
         token = await self._get_token()
         data = {"access_token": token, "func": func, **params}
         try:
-            async with self.session.post(_RESOURCE_URL, proxy=self._proxy,
-                                         data=data) as resp:
+            async with self.session.post(
+                _RESOURCE_URL, proxy=self._proxy, proxy_auth=self._proxy_auth,
+                data=data,
+            ) as resp:
                 if resp.status in (401, 403) and retry_auth:
                     await self._get_token(force=True)
                     return await self._call(func, retry_auth=False, **params)

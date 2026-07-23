@@ -42,8 +42,21 @@ def test_name_key_normalisation():
     assert _name_key("") == ""
 
 
-def test_proxy_stored_and_optional():
+def test_proxy_credentials_split_for_aiohttp():
+    # aiohttp ignores userinfo in the proxy URL, so it must be split into
+    # a clean URL + BasicAuth or the proxy answers 407.
     c1 = SeedrClient("u", "p", proxy="http://user:pass@host:6540")
-    assert c1._proxy == "http://user:pass@host:6540"
-    c2 = SeedrClient("u", "p")
-    assert c2._proxy is None       # aiohttp expects None, not ""
+    assert c1._proxy == "http://host:6540"
+    assert c1._proxy_auth is not None
+    assert c1._proxy_auth.login == "user" and c1._proxy_auth.password == "pass"
+
+
+def test_proxy_without_credentials():
+    c = SeedrClient("u", "p", proxy="http://host:6540")
+    assert c._proxy == "http://host:6540"
+    assert c._proxy_auth is None
+
+
+def test_no_proxy():
+    c = SeedrClient("u", "p")
+    assert c._proxy is None and c._proxy_auth is None   # aiohttp wants None
