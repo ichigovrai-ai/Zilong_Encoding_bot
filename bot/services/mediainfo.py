@@ -42,7 +42,37 @@ def render_cli(text: str, filename: str) -> str:
     body = text
     if len(body) > _TG_LIMIT:
         body = body[:_TG_LIMIT].rsplit("\n", 1)[0] + "\n… (truncated)"
-    return f"📋 <b>Media information</b>\n<pre>{escape(body)}</pre>"
+    return f"📋 <b>Full MediaInfo</b> — <code>{escape(filename)}</code>\n<pre>{escape(body)}</pre>"
+
+
+_CHANNELS = {1: "Mono", 2: "Stereo", 6: "5.1", 8: "7.1"}
+
+
+def render_card(media: MediaInfo, filename: str) -> str:
+    """Compact summary card (the Zilong-style MediaInfo view)."""
+    from bot.ui.panels import SEP
+    lines = [
+        "📊 <b>MediaInfo</b>",
+        SEP,
+        f"📄 <code>{escape(filename)}</code>",
+        f"📦 {human_size(media.size)} · ⏱ {fmt_hms(media.duration)}",
+    ]
+    v = media.main_video
+    if v:
+        fps = f" · {v.fps:g}fps" if v.fps else ""
+        lines += ["", f"🎬 {escape(v.codec.upper())} {v.width}×{v.height}{fps}"]
+    for a in media.audio[:3]:
+        ch = _CHANNELS.get(a.channels, f"{a.channels}ch")
+        lang = f" [{escape(a.language)}]" if a.language and a.language != "und" else ""
+        lines.append(f"🔊 {escape(a.codec.upper())} {ch}{lang}")
+    if media.subtitles:
+        langs = ", ".join(dict.fromkeys(
+            s.language for s in media.subtitles if s.language != "und"))
+        lines.append(f"💬 {len(media.subtitles)} subtitle(s)"
+                     + (f" — {escape(langs)}" if langs else ""))
+    if media.chapters:
+        lines.append(f"📚 {media.chapters} chapters")
+    return "\n".join(lines)
 
 
 def _kbps(bps: int) -> str:

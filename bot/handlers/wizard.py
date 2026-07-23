@@ -328,6 +328,13 @@ async def start_confirmed(rt: Runtime, job: Job) -> str:
 
 async def spawn_seedr_children(rt: Runtime, parent: Job) -> int:
     """Create one child job per selected episode, inheriting wizard options."""
+    from bot.services.user_settings import get_user_settings, value_of
+    try:
+        settings = await get_user_settings(rt.db, parent.user_id)
+    except Exception:  # noqa: BLE001
+        settings = {}
+    seedr_hardsub_enabled = value_of(settings, "seedr_hardsub") == "on"
+
     s = parent.seedr
     matches: list[dict] = s.get("matches") or []
     selected: list[int] = s.get("selected") or []
@@ -346,9 +353,9 @@ async def spawn_seedr_children(rt: Runtime, parent: Job) -> int:
         # Seedr episodes are hardsubbed by default: use the matched external
         # subtitle if there is one, otherwise burn the video's own embedded
         # subtitle (embedded_auto). The worker degrades to a plain encode only
-        # if the file genuinely has no text subtitle. Set no_subs in options
-        # to opt out.
-        want_subs = not parent.options.get("no_subs")
+        # if the file genuinely has no text subtitle. The user's "Seedr
+        # hardsub" setting turns this off.
+        want_subs = seedr_hardsub_enabled
         if not want_subs:
             sub_mode, sub_source = "none", ""
         elif has_sub:

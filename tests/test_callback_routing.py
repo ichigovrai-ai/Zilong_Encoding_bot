@@ -15,6 +15,7 @@ INLINE_VERBS = frozenset({
     "st",   # settings toggle
     "x",    # cancel
     "rt",   # retry
+    "mi",   # mediainfo card/full toggle
     "cv",   # convert subtitle
     "a",    # action menu
     "go",   # start / confirm

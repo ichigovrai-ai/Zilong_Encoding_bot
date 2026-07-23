@@ -60,6 +60,11 @@ async def on_callback(_: Client, cb: CallbackQuery) -> None:
                             f"<code>{job.input_name[:50]}</code>")
         return
 
+    # ── MediaInfo card/full toggle (valid on the completed mediainfo job) ─
+    if data.verb == "mi":
+        await _handle_mediainfo(rt, cb, job, data.arg)
+        return
+
     # ── Retry (only valid on a terminal FAILED job) ─────────────────────
     if data.verb == "rt":
         if job.status != JobStatus.FAILED:
@@ -135,6 +140,24 @@ async def on_callback(_: Client, cb: CallbackQuery) -> None:
     await cb.answer()
 
 
+async def _handle_mediainfo(rt: Runtime, cb: CallbackQuery, job: Job,
+                            arg: str) -> None:
+    """Toggle between the compact MediaInfo card and the full CLI report."""
+    from bot.services.mediainfo import render_cli
+    full = str(job.options.get("mi_full", ""))
+    card = str(job.options.get("mi_card", ""))
+    if arg == "full" and full:
+        await cb.answer()
+        await _edit(cb, render_cli(full, job.input_name),
+                    keyboards.mediainfo_full_menu(job.id))
+    elif arg == "card" and card:
+        await cb.answer()
+        await _edit(cb, card,
+                    keyboards.mediainfo_menu(job.id, has_full=bool(full)))
+    else:
+        await cb.answer("That view is no longer available.", show_alert=True)
+
+
 async def _handle_convertsub(rt: Runtime, cb: CallbackQuery, job: Job,
                              target: str) -> None:
     """Convert an uploaded subtitle file and send it back as a document."""
@@ -174,33 +197,28 @@ async def _handle_convertsub(rt: Runtime, cb: CallbackQuery, job: Job,
 
 
 async def _handle_setting(rt: Runtime, cb: CallbackQuery, arg: str) -> None:
-    """Cycle a user preference and refresh the /settings message."""
+    """Cycle one preference to its next value and refresh the /settings menu."""
     from bot.services.user_settings import (
-        get_user_settings, next_upload_mode, update_user_setting,
+        button_label, cycle_setting, get_user_settings, is_setting,
     )
-    from bot.ui.panels import next_style, style_label
-
     uid = cb.from_user.id if cb.from_user else 0
-    settings = await get_user_settings(rt.db, uid)
-    if arg == "style":
-        new = next_style(settings.get("panel_style"))
-        settings = await update_user_setting(rt.db, uid, "panel_style", new)
-        await cb.answer(f"Panel style: {style_label(new)}")
-    elif arg == "upload":
-        new = next_upload_mode(str(settings.get("upload_as", "auto")))
-        settings = await update_user_setting(rt.db, uid, "upload_as", new)
-        await cb.answer(f"Upload as: {new}")
-    else:
+    if arg == "done":
+        await cb.answer("Saved ✅")
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    if not is_setting(arg):
         await cb.answer()
         return
+    settings = await cycle_setting(rt.db, uid, arg)
+    await cb.answer(button_label(settings, arg).split(": ", 1)[-1])
     from bot.handlers.start import settings_text
     try:
         await cb.message.edit_text(
             settings_text(rt, settings),
-            reply_markup=keyboards.settings_menu(
-                str(settings.get("panel_style", "A")),
-                str(settings.get("upload_as", "auto")),
-            ),
+            reply_markup=keyboards.settings_menu(settings),
             parse_mode=enums.ParseMode.HTML,
         )
     except Exception as exc:  # noqa: BLE001

@@ -35,6 +35,8 @@ def plan_from_options(
     default_codec: str = "libx264",
     default_preset: str = "medium",
     default_crf: int = 23,
+    default_resolution: str = "orig",
+    default_audio: str = "aac",
     capabilities: dict[str, bool] | None = None,
 ) -> PlanResult:
     warnings: list[str] = []
@@ -52,7 +54,7 @@ def plan_from_options(
     plan = EncodePlan(video_codec=codec, preset=str(options.get("preset", default_preset)))
 
     # ── Resolution ──────────────────────────────────────────────────────
-    res = options.get("resolution", "orig")
+    res = options.get("resolution", default_resolution)
     allow_upscale = bool(options.get("allow_upscale"))
     letterbox = bool(options.get("letterbox"))
     if isinstance(res, list) and len(res) == 2:  # custom exact WxH
@@ -82,7 +84,7 @@ def plan_from_options(
         )
 
     # ── Audio ───────────────────────────────────────────────────────────
-    audio = str(options.get("audio", "aac"))
+    audio = str(options.get("audio", default_audio))
     if audio == "copy":
         plan.audio_codec = "copy"
         probed = media.audio[0].bitrate // 1000 if media.audio else 0

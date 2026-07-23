@@ -67,7 +67,6 @@ async def run_job(job_id: str, token: CancelToken) -> None:
     except Exception:  # noqa: BLE001 — preferences must never block a job
         settings = {}
     style = panels.norm_style(settings.get("panel_style"))
-    upload_pref = str(settings.get("upload_as", "auto"))
     started = time.monotonic()
     try:
         if job.cancel_requested:
@@ -81,8 +80,7 @@ async def run_job(job_id: str, token: CancelToken) -> None:
             )
         else:
             await asyncio.wait_for(
-                _run_pipeline(rt, job, token, reporter, started, style,
-                              upload_pref),
+                _run_pipeline(rt, job, token, reporter, started, settings),
                 timeout=timeout,
             )
     except (asyncio.CancelledError, asyncio.TimeoutError) as exc:
@@ -153,8 +151,12 @@ async def _finalise(rt: Runtime, job_id: str, reporter: ProgressReporter,
 
 async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
                         reporter: ProgressReporter, started: float,
-                        style: str = "A", upload_pref: str = "auto") -> None:
+                        settings: dict | None = None) -> None:
+    from bot.services.user_settings import value_of
     cfg = rt.config
+    settings = settings or {}
+    style = panels.norm_style(settings.get("panel_style"))
+    upload_pref = value_of(settings, "upload_as")
     work = Path(job.work_dir)
     if not work.exists():
         from bot.utils.paths import create_job_dirs
@@ -189,12 +191,21 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
     media = await probe_media(str(input_path), ffprobe=cfg.ffprobe_path)
 
     if job.kind == JobKind.MEDIAINFO:
-        from bot.services.mediainfo import mediainfo_cli_text, render_cli
+        from bot.services.mediainfo import mediainfo_cli_text, render_card
         cli = await mediainfo_cli_text(str(input_path),
                                        binary=cfg.mediainfo_path)
-        text = (render_cli(cli, job.input_name) if cli
-                else render_mediainfo(media, job.input_name))
-        await reporter.update(text, force=True)
+        card = render_card(media, job.input_name)
+        # Stash the card + full CLI report so the card/full buttons work after
+        # cleanup (the job row persists; the work dir does not).
+        job.options["mi_card"] = card
+        if cli:
+            job.options["mi_full"] = cli
+        await rt.repo.update_fields(job.id, options=job.options)
+        await reporter.update(
+            card,
+            reply_markup=keyboards.mediainfo_menu(job.id, has_full=bool(cli)),
+            force=True,
+        )
         await rt.repo.transition(job.id, JobStatus.COMPLETED)
         return
 
@@ -203,11 +214,16 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
         return
 
     # ── 3. Subtitles ────────────────────────────────────────────────────
+    _codec_map = {"x264": "libx264", "x265": "libx265", "av1": "libsvtav1"}
+    _def_res = value_of(settings, "def_resolution")
     plan_result = plan_from_options(
         job.options, media,
-        default_codec=cfg.default_video_codec,
-        default_preset=cfg.default_preset,
-        default_crf=cfg.default_crf,
+        default_codec=_codec_map.get(value_of(settings, "def_codec"),
+                                     cfg.default_video_codec),
+        default_preset=value_of(settings, "def_preset"),
+        default_crf=int(value_of(settings, "def_crf")),
+        default_resolution="orig" if _def_res == "original" else _def_res,
+        default_audio=value_of(settings, "def_audio"),
         capabilities=rt.capabilities,
     )
     plan = plan_result.plan
@@ -225,8 +241,11 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
             + "\n".join(sub_stages),
             reply_markup=keyboards.cancel_only(job.id),
         )
-        warnings += await _prepare_subtitles(rt, job, media, input_path,
-                                             work, plan, token)
+        sub_lang = value_of(settings, "sub_lang")
+        warnings += await _prepare_subtitles(
+            rt, job, media, input_path, work, plan, token,
+            preferred_lang="" if sub_lang == "off" else sub_lang,
+        )
     token.raise_if_cancelled()
 
     # ── 4. Encode ───────────────────────────────────────────────────────
@@ -397,7 +416,8 @@ async def _acquire_input(rt: Runtime, job: Job, work: Path,
 
 async def _prepare_subtitles(rt: Runtime, job: Job, media: MediaInfo,
                              input_path: Path, work: Path, plan: EncodePlan,
-                             token: CancelToken) -> list[str]:
+                             token: CancelToken,
+                             preferred_lang: str = "") -> list[str]:
     """Resolve the subtitle source into plan.subtitle_path (+fonts).
 
     subtitle_source values:
@@ -413,7 +433,7 @@ async def _prepare_subtitles(rt: Runtime, job: Job, media: MediaInfo,
     raw_path: str = ""
 
     if sub_source == "embedded_auto":
-        stream = _pick_embedded_sub(media, cfg.preferred_sub_lang)
+        stream = _pick_embedded_sub(media, preferred_lang or cfg.preferred_sub_lang)
         if stream is None:
             # Nothing burnable (no text subtitle) — encode without subs
             # instead of failing the whole job.

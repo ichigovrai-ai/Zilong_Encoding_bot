@@ -60,30 +60,22 @@ async def cmd_presets(_: Client, message: Message) -> None:
 
 
 def settings_text(rt, settings: dict) -> str:
-    from bot.services.user_settings import UPLOAD_MODE_LABELS
-    from bot.ui.panels import SEP, bar, style_label
+    from bot.services.user_settings import SETTINGS, value_of
+    from bot.ui.panels import SEP
     cfg = rt.config
-    style = str(settings.get("panel_style", "A"))
-    upload = str(settings.get("upload_as", "auto"))
-    return (
-        "⚙️ <b>SETTINGS</b>\n"
-        f"{SEP}\n"
-        f"🎨 Panel style: <b>{style_label(style)}</b>  "
-        f"<code>{bar(60, style)}</code>\n"
-        f"📤 Upload as: <b>{UPLOAD_MODE_LABELS.get(upload, '🤖 Auto')}</b>\n\n"
-        "🧰 <b>BOT DEFAULTS</b>\n"
-        f"{SEP}\n"
-        f"🎯 Codec <code>{cfg.default_video_codec}</code> · "
-        f"🔊 <code>{cfg.default_audio_codec}</code>\n"
-        f"🎛 CRF <code>{cfg.default_crf}</code> · "
-        f"⏩ preset <code>{cfg.default_preset}</code>\n"
-        f"🌱 Seedr auto-delete: "
-        f"<code>{'on' if cfg.seedr_auto_delete else 'off'}</code>\n"
+    lines = ["⚙️ <b>SETTINGS</b>", SEP,
+             "<i>Tap any button below to change it.</i>", ""]
+    for s in SETTINGS:
+        lines.append(f"{s.label}: <b>{s.display(value_of(settings, s.key))}</b>")
+    lines += [
+        "", "🧰 <b>BOT LIMITS</b>", SEP,
         f"📥 Max input {human_size(cfg.max_input_size)} · "
-        f"📤 max output {human_size(cfg.max_output_size)}\n"
-        f"👤 Jobs per user: {cfg.max_jobs_per_user}\n\n"
-        "Tap a button to change your preferences:"
-    )
+        f"📤 max output {human_size(cfg.max_output_size)}",
+        f"🌱 Seedr auto-delete: "
+        f"<code>{'on' if cfg.seedr_auto_delete else 'off'}</code> · "
+        f"👤 jobs/user: {cfg.max_jobs_per_user}",
+    ]
+    return "\n".join(lines)
 
 
 @Client.on_message(filters.command("settings") & filters.private)
@@ -94,10 +86,7 @@ async def cmd_settings(_: Client, message: Message) -> None:
     settings = await get_user_settings(rt.db, message.from_user.id)
     await message.reply_text(
         settings_text(rt, settings),
-        reply_markup=keyboards.settings_menu(
-            str(settings.get("panel_style", "A")),
-            str(settings.get("upload_as", "auto")),
-        ),
+        reply_markup=keyboards.settings_menu(settings),
         parse_mode=enums.ParseMode.HTML,
     )
 

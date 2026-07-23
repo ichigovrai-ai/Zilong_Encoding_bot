@@ -140,6 +140,16 @@ def retry_menu(job_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[_btn("🔁 Retry", "rt", job_id)]])
 
 
+def mediainfo_menu(job_id: str, has_full: bool) -> InlineKeyboardMarkup:
+    if not has_full:
+        return InlineKeyboardMarkup([])
+    return InlineKeyboardMarkup([[_btn("📋 Full MediaInfo →", "mi", job_id, "full")]])
+
+
+def mediainfo_full_menu(job_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[_btn("⬅️ Back", "mi", job_id, "card")]])
+
+
 def convertsub_menu(job_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [_btn("➡️ To SRT", "cv", job_id, "srt"),
@@ -186,16 +196,14 @@ def subtitle_pick_menu(job_id: str, episode_idx: int,
     return InlineKeyboardMarkup(rows)
 
 
-def settings_menu(panel_style: str, upload_mode: str) -> InlineKeyboardMarkup:
-    """User preferences — settings callbacks carry no job id."""
-    from bot.services.user_settings import UPLOAD_MODE_LABELS
-    from bot.ui.panels import style_label
-    return InlineKeyboardMarkup([
-        [_btn(f"🎨 Panel style: {style_label(panel_style)}", "st", "", "style")],
-        [_btn(f"📤 Upload as: "
-              f"{UPLOAD_MODE_LABELS.get(upload_mode, '🤖 Auto')}",
-              "st", "", "upload")],
-    ])
+def settings_menu(settings: dict) -> InlineKeyboardMarkup:
+    """Full preferences menu — one button per setting, tap to cycle its value.
+    Callbacks carry the setting key as the arg and no job id."""
+    from bot.services.user_settings import SETTINGS, button_label
+    rows = [[_btn(button_label(settings, s.key), "st", "", s.key)]
+            for s in SETTINGS]
+    rows.append([_btn("✅ Done", "st", "", "done")])
+    return InlineKeyboardMarkup(rows)
 
 
 def extract_menu(job_id: str, n_subs: int, n_audio: int) -> InlineKeyboardMarkup:
