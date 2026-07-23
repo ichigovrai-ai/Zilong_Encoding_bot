@@ -20,17 +20,18 @@ async def cmd_queue(_: Client, message: Message) -> None:
         seen = {j.id for j in jobs}
         jobs += [j for j in moving if j.id not in seen]
 
+    from bot.ui.panels import SEP
     open_jobs = [j for j in jobs if j.status not in TERMINAL]
     recent_done = [j for j in jobs if j.status in TERMINAL][:8]
-    lines = ["<b>📋 Queue</b>", ""]
+    lines = ["📊 <b>QUEUE</b>", SEP]
     if open_jobs:
         lines += [messages.job_line(j) for j in open_jobs]
     else:
-        lines.append("<i>No active or waiting jobs.</i>")
+        lines.append("<i>😴 No active or waiting jobs.</i>")
     if recent_done:
-        lines += ["", "<b>Recently finished</b>"]
+        lines += ["", "🗂 <b>RECENTLY FINISHED</b>", SEP]
         lines += [messages.job_line(j) for j in recent_done]
-    lines += ["", "Cancel with <code>/cancel &lt;job id&gt;</code>."]
+    lines += ["", "🛑 Cancel with <code>/cancel &lt;job id&gt;</code>"]
     await message.reply_text("\n".join(lines), parse_mode=enums.ParseMode.HTML)
 
 
@@ -77,8 +78,9 @@ async def cmd_history(_: Client, message: Message) -> None:
     rt = get_runtime()
     jobs = await rt.repo.user_jobs(message.from_user.id, limit=15)
     if not jobs:
-        await message.reply_text("No jobs yet.")
+        await message.reply_text("😴 No jobs yet — send me a video!")
         return
-    lines = ["<b>🗂 Your recent jobs</b>", ""]
+    from bot.ui.panels import SEP
+    lines = ["🗂 <b>YOUR RECENT JOBS</b>", SEP]
     lines += [messages.job_line(j) for j in jobs]
     await message.reply_text("\n".join(lines), parse_mode=enums.ParseMode.HTML)

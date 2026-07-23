@@ -35,7 +35,8 @@ from bot.services.thumbnail import make_thumbnail
 from bot.services.upload import (
     UploadError, build_caption, should_send_as_video, upload_file,
 )
-from bot.ui import keyboards, messages
+from bot.services.user_settings import get_user_settings
+from bot.ui import keyboards, panels
 from bot.utils.filenames import build_output_name, unique_path
 from bot.utils.matching import (
     SUBTITLE_EXTS, VIDEO_EXTS, MatchConfidence, match_subtitles,
@@ -61,6 +62,12 @@ async def run_job(job_id: str, token: CancelToken) -> None:
         rt.client, job.chat_id, job.status_msg_id,
         rt.config.progress_update_interval,
     )
+    try:
+        settings = await get_user_settings(rt.db, job.user_id)
+    except Exception:  # noqa: BLE001 — preferences must never block a job
+        settings = {}
+    style = panels.norm_style(settings.get("panel_style"))
+    upload_pref = str(settings.get("upload_as", "auto"))
     started = time.monotonic()
     try:
         if job.cancel_requested:
@@ -69,11 +76,14 @@ async def run_job(job_id: str, token: CancelToken) -> None:
         if job.kind == JobKind.SEEDR_HARDSUB and job.input_type == InputType.MAGNET:
             timeout = max(timeout, rt.config.seedr_timeout_hours * 3600 + 3600)
             await asyncio.wait_for(
-                _run_seedr_parent(rt, job, token, reporter), timeout=timeout
+                _run_seedr_parent(rt, job, token, reporter, style),
+                timeout=timeout,
             )
         else:
             await asyncio.wait_for(
-                _run_pipeline(rt, job, token, reporter, started), timeout=timeout
+                _run_pipeline(rt, job, token, reporter, started, style,
+                              upload_pref),
+                timeout=timeout,
             )
     except (asyncio.CancelledError, asyncio.TimeoutError) as exc:
         cancelled = token.cancelled or job.cancel_requested
@@ -112,10 +122,16 @@ async def _finalise(rt: Runtime, job_id: str, reporter: ProgressReporter,
             job = await rt.repo.transition(job_id, status, error=error)
         if job:
             if status == JobStatus.FAILED:
-                await reporter.update(messages.error_text(job), force=True)
+                await reporter.update(
+                    panels.error_panel(filename=job.input_name,
+                                       error=job.error or error,
+                                       job_id=job.id),
+                    force=True,
+                )
             elif status == JobStatus.CANCELLED:
                 await reporter.update(
-                    f"🚫 <b>Cancelled</b> — <code>{job.input_name[:50]}</code>",
+                    panels.cancelled_panel(filename=job.input_name,
+                                           job_id=job.id),
                     force=True,
                 )
     except Exception:  # noqa: BLE001
@@ -135,7 +151,8 @@ async def _finalise(rt: Runtime, job_id: str, reporter: ProgressReporter,
 # ═════════════════════════════════════════════════════════════════════════
 
 async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
-                        reporter: ProgressReporter, started: float) -> None:
+                        reporter: ProgressReporter, started: float,
+                        style: str = "A", upload_pref: str = "auto") -> None:
     cfg = rt.config
     work = Path(job.work_dir)
     if not work.exists():
@@ -147,18 +164,27 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
         raise ValidationError(
             "Not enough free disk space on the server — try again later."
         )
+    with_subs = str(job.options.get("subtitle_mode", "none")) in ("hard", "soft")
 
     # ── 1. Acquire input ────────────────────────────────────────────────
     await rt.repo.transition(job.id, JobStatus.DOWNLOADING, stage="downloading")
     async with rt.manager.download_sem:
         token.raise_if_cancelled()
-        input_path = await _acquire_input(rt, job, work, token, reporter)
+        input_path = await _acquire_input(rt, job, work, token, reporter,
+                                          style, with_subs)
     token.raise_if_cancelled()
 
     # ── 2. Probe ────────────────────────────────────────────────────────
     await rt.repo.transition(job.id, JobStatus.PROBING, stage="probing")
-    await reporter.update(f"🔎 Analysing <code>{job.input_name[:50]}</code>…",
-                          reply_markup=keyboards.cancel_only(job.id))
+    analyse_stages = panels.stage_checklist(
+        panels.pipeline_stages("analyse", with_subtitles=with_subs)
+    )
+    await reporter.update(
+        "🔎 <b>ANALYSING</b>\n" + panels.SEP + "\n"
+        f"📄 <code>{panels.short_name(job.input_name)}</code>\n\n"
+        + "\n".join(analyse_stages),
+        reply_markup=keyboards.cancel_only(job.id),
+    )
     media = await probe_media(str(input_path), ffprobe=cfg.ffprobe_path)
 
     if job.kind == JobKind.MEDIAINFO:
@@ -184,8 +210,15 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
     if plan.subtitle_mode in ("hard", "soft"):
         await rt.repo.transition(job.id, JobStatus.PREPARING_SUBTITLES,
                                  stage="subtitles")
-        await reporter.update("💬 Preparing subtitles…",
-                              reply_markup=keyboards.cancel_only(job.id))
+        sub_stages = panels.stage_checklist(
+            panels.pipeline_stages("subtitles", with_subtitles=True)
+        )
+        await reporter.update(
+            "💬 <b>PREPARING SUBTITLES</b>\n" + panels.SEP + "\n"
+            f"📄 <code>{panels.short_name(job.input_name)}</code>\n\n"
+            + "\n".join(sub_stages),
+            reply_markup=keyboards.cancel_only(job.id),
+        )
         warnings += await _prepare_subtitles(rt, job, media, input_path,
                                              work, plan, token)
     token.raise_if_cancelled()
@@ -201,7 +234,7 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
     async with rt.manager.encode_sem:
         token.raise_if_cancelled()
         await _run_encode(rt, job, plan, media, input_path, output_path,
-                          work, token, reporter, started)
+                          work, token, reporter, started, style, with_subs)
     await rt.repo.update_fields(job.id, output_path=str(output_path))
 
     if not output_path.exists() or output_path.stat().st_size == 0:
@@ -226,11 +259,21 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
         ffmpeg=cfg.ffmpeg_path, cancel_token=token,
     )
 
+    upload_started = time.monotonic()
+    upload_stages = panels.pipeline_stages("upload", with_subtitles=with_subs)
+
     async def _upl_progress(done: int, total: int) -> None:
         await rt.repo.update_fields(job.id, progress=done / total * 100 if total else 0)
-        await reporter.update(messages.transfer_progress(
-            "Uploading to Telegram", output_path.name, done, total, "⬆️"),
-            reply_markup=keyboards.cancel_only(job.id))
+        elapsed_ul = time.monotonic() - upload_started
+        speed = done / elapsed_ul if elapsed_ul > 1 else 0.0
+        await reporter.update(
+            panels.transfer_panel(
+                title="Uploading", icon="📤", filename=output_path.name,
+                done=done, total=total, speed=speed, elapsed=elapsed_ul,
+                source="Telegram 📲", stages=upload_stages, style=style,
+            ),
+            reply_markup=keyboards.cancel_only(job.id),
+        )
 
     elapsed = time.monotonic() - started
     caption = build_caption(
@@ -247,7 +290,8 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
             rt.client, job.chat_id, output_path,
             media=out_media, caption=caption, thumb=thumb,
             as_video=should_send_as_video(
-                output_path, out_media, str(job.options.get("upload_as", "auto"))
+                output_path, out_media,
+                str(job.options.get("upload_as") or upload_pref or "auto"),
             ),
             progress_cb=_upl_progress,
             cancelled=lambda: token.cancelled,
@@ -255,7 +299,11 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
 
     await rt.repo.transition(job.id, JobStatus.COMPLETED, stage="done")
     await reporter.update(
-        messages.completed_text(job, time.monotonic() - started, out_size),
+        panels.done_panel(
+            filename=output_path.name, out_size=out_size,
+            elapsed=time.monotonic() - started,
+            settings_line=plan.summary(), job_id=job.id,
+        ),
         force=True,
     )
     from bot.services.cleanup import cleanup_job_dir
@@ -263,20 +311,39 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
     await _maybe_delete_seedr_folder(rt, job.id)
 
 
+_SOURCE_LABELS = {
+    InputType.TG_VIDEO: "Telegram 📲",
+    InputType.TG_DOCUMENT: "Telegram 📲",
+    InputType.URL: "Direct 🔗",
+    InputType.SEEDR_FILE: "Seedr ☁️",
+}
+
+
 async def _acquire_input(rt: Runtime, job: Job, work: Path,
-                         token: CancelToken, reporter: ProgressReporter) -> Path:
+                         token: CancelToken, reporter: ProgressReporter,
+                         style: str = "A", with_subs: bool = False) -> Path:
     cfg = rt.config
     suffix = Path(job.input_name).suffix.lower()
     if suffix not in VIDEO_EXTS:
         suffix = ".mkv" if job.input_type != InputType.URL else (suffix or ".mp4")
     dest = work / "input" / f"input{suffix}"
+    dl_started = time.monotonic()
+    dl_stages = panels.pipeline_stages("download", with_subtitles=with_subs)
+    source = _SOURCE_LABELS.get(job.input_type, "Source 🔗")
 
     async def _dl_progress(done: int, total: int) -> None:
         pct = done / total * 100 if total else 0.0
         await rt.repo.update_fields(job.id, progress=pct)
-        await reporter.update(messages.transfer_progress(
-            "Downloading", job.input_name, done, total),
-            reply_markup=keyboards.cancel_only(job.id))
+        elapsed = time.monotonic() - dl_started
+        speed = done / elapsed if elapsed > 1 else 0.0
+        await reporter.update(
+            panels.transfer_panel(
+                title="Downloading", icon="📥", filename=job.input_name,
+                done=done, total=total, speed=speed, elapsed=elapsed,
+                source=source, stages=dl_stages, style=style,
+            ),
+            reply_markup=keyboards.cancel_only(job.id),
+        )
 
     if job.input_type in (InputType.TG_VIDEO, InputType.TG_DOCUMENT):
         src_msg_id = int(job.options.get("src_msg_id", 0))
@@ -376,7 +443,8 @@ def _relpath_for_filter(path: Path, work: Path) -> str:
 async def _run_encode(rt: Runtime, job: Job, plan: EncodePlan, media: MediaInfo,
                       input_path: Path, output_path: Path, work: Path,
                       token: CancelToken, reporter: ProgressReporter,
-                      started: float) -> None:
+                      started: float, style: str = "A",
+                      with_subs: bool = False) -> None:
     cfg = rt.config
     duration = media.duration or 1.0
     rel_input = _relpath_for_filter(input_path, work)
@@ -385,19 +453,24 @@ async def _run_encode(rt: Runtime, job: Job, plan: EncodePlan, media: MediaInfo,
     if plan.subtitle_mode == "soft" and plan.subtitle_path:
         extra_inputs.append(plan.subtitle_path)
 
+    encode_stages = panels.pipeline_stages("encode", with_subtitles=with_subs)
+    settings_line = plan.summary()
     passes: list[int] = [1, 2] if plan.two_pass else [0]
     for i, pass_num in enumerate(passes):
         base_pct = 50.0 * i if plan.two_pass else 0.0
         scale = 50.0 if plan.two_pass else 100.0
+        pass_label = f"pass {pass_num}/2" if plan.two_pass else ""
 
         async def _on_progress(p) -> None:
             pct = base_pct + p.percent * scale / 100
             await rt.repo.update_fields(job.id, progress=pct)
             await reporter.update(
-                messages.encode_progress(
-                    job, pct=pct, done_s=p.out_time_s, total_s=duration,
-                    speed=p.speed, fps=p.fps, est_size=p.total_size,
+                panels.encode_panel(
+                    filename=job.input_name, settings_line=settings_line,
+                    pct=pct, done_s=p.out_time_s, total_s=duration,
+                    speed=p.speed, fps=p.fps, out_size=p.total_size,
                     elapsed=time.monotonic() - started, eta=p.eta_s,
+                    stages=encode_stages, pass_label=pass_label, style=style,
                 ),
                 reply_markup=keyboards.cancel_only(job.id),
             )
@@ -464,19 +537,24 @@ async def _run_extract(rt: Runtime, job: Job, media: MediaInfo,
 # ═════════════════════════════════════════════════════════════════════════
 
 async def _run_seedr_parent(rt: Runtime, job: Job, token: CancelToken,
-                            reporter: ProgressReporter) -> None:
+                            reporter: ProgressReporter,
+                            style: str = "A") -> None:
     cfg = rt.config
     if not cfg.seedr_enabled:
         raise SeedrError("Seedr is not configured on this bot "
                          "(SEEDR_USERNAME / SEEDR_PASSWORD).")
+    seedr_started = time.monotonic()
+    name_hint = str(job.options.get("magnet_name", "") or job.input_name)
     await rt.repo.transition(job.id, JobStatus.DOWNLOADING, stage="seedr_add")
-    await reporter.update("🌱 Adding magnet to Seedr…",
-                          reply_markup=keyboards.cancel_only(job.id), force=True)
+    await reporter.update(
+        panels.seedr_panel(torrent_name=name_hint, pct=None, current="magnet",
+                           note="Sending magnet to Seedr…", style=style),
+        reply_markup=keyboards.cancel_only(job.id), force=True,
+    )
 
     async with SeedrClient(cfg.seedr_username, cfg.seedr_password) as sc:
         known = {f.id for f in (await sc.list_folder(0)).folders}
         torrent_id = await sc.add_magnet(job.input_ref)
-        name_hint = str(job.options.get("magnet_name", "") or job.input_name)
 
         last_edit = {"t": 0.0}
 
@@ -487,7 +565,11 @@ async def _run_seedr_parent(rt: Runtime, job: Job, token: CancelToken,
             if now - last_edit["t"] >= cfg.progress_update_interval:
                 last_edit["t"] = now
                 await reporter.update(
-                    messages.seedr_progress(name or name_hint, pct),
+                    panels.seedr_panel(
+                        torrent_name=name or name_hint, pct=pct,
+                        current="cloud",
+                        elapsed=time.monotonic() - seedr_started, style=style,
+                    ),
                     reply_markup=keyboards.cancel_only(job.id),
                 )
 
@@ -499,7 +581,14 @@ async def _run_seedr_parent(rt: Runtime, job: Job, token: CancelToken,
             progress_cb=_poll_progress, cancel_token=token,
         )
 
-        await reporter.update("🌱 Torrent complete — reading folder…", force=True)
+        await reporter.update(
+            panels.seedr_panel(
+                torrent_name=folder.name, pct=100.0, current="match",
+                elapsed=time.monotonic() - seedr_started,
+                note="Reading folder and matching subtitles…", style=style,
+            ),
+            force=True,
+        )
         files = await sc.walk_folder(folder.id)
 
     videos = [f for f in files if Path(f.name).suffix.lower() in VIDEO_EXTS
@@ -535,17 +624,11 @@ async def _run_seedr_parent(rt: Runtime, job: Job, token: CancelToken,
 
     n_uncertain = sum(1 for m in match_dicts
                       if m["confidence"] == MatchConfidence.UNCERTAIN.value)
-    text = (
-        f"🌱 <b>{folder.name[:60]}</b>\n\n"
-        f"Found <b>{len(videos)}</b> video(s) and <b>{len(subs)}</b> "
-        f"subtitle(s).\n"
-    )
-    if n_uncertain:
-        text += (f"⚠️ {n_uncertain} match(es) are uncertain — tap "
-                 f"“pick subtitle…” to fix them.\n")
-    text += "\nSelect the episodes to process:"
     await reporter.update(
-        text,
+        panels.episodes_panel(
+            folder_name=folder.name, n_videos=len(videos), n_subs=len(subs),
+            n_selected=len(job.seedr["selected"]), n_uncertain=n_uncertain,
+        ),
         reply_markup=keyboards.episodes_menu(
             job.id, match_dicts, job.seedr["selected"]
         ),

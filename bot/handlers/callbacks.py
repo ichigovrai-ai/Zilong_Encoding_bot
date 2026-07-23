@@ -38,6 +38,9 @@ async def on_callback(_: Client, cb: CallbackQuery) -> None:
     if data.verb == "n":
         await cb.answer()
         return
+    if data.verb == "st":
+        await _handle_setting(rt, cb, data.arg)
+        return
 
     job = await rt.repo.get(data.job_id)
     if job is None:
@@ -106,6 +109,41 @@ async def on_callback(_: Client, cb: CallbackQuery) -> None:
         return
 
     await cb.answer()
+
+
+async def _handle_setting(rt: Runtime, cb: CallbackQuery, arg: str) -> None:
+    """Cycle a user preference and refresh the /settings message."""
+    from bot.services.user_settings import (
+        get_user_settings, next_upload_mode, update_user_setting,
+    )
+    from bot.ui.panels import next_style, style_label
+
+    uid = cb.from_user.id if cb.from_user else 0
+    settings = await get_user_settings(rt.db, uid)
+    if arg == "style":
+        new = next_style(settings.get("panel_style"))
+        settings = await update_user_setting(rt.db, uid, "panel_style", new)
+        await cb.answer(f"Panel style: {style_label(new)}")
+    elif arg == "upload":
+        new = next_upload_mode(str(settings.get("upload_as", "auto")))
+        settings = await update_user_setting(rt.db, uid, "upload_as", new)
+        await cb.answer(f"Upload as: {new}")
+    else:
+        await cb.answer()
+        return
+    from bot.handlers.start import settings_text
+    try:
+        await cb.message.edit_text(
+            settings_text(rt, settings),
+            reply_markup=keyboards.settings_menu(
+                str(settings.get("panel_style", "A")),
+                str(settings.get("upload_as", "auto")),
+            ),
+            parse_mode=enums.ParseMode.HTML,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if "MESSAGE_NOT_MODIFIED" not in str(exc):
+            log.warning("Settings edit failed: %s", exc)
 
 
 async def _handle_action(rt: Runtime, cb: CallbackQuery, job: Job,
@@ -218,7 +256,21 @@ async def _handle_episode_verb(rt: Runtime, cb: CallbackQuery, job: Job,
 
     await rt.repo.update_fields(job.id, seedr=s)
     await cb.answer()
-    await _edit(cb, cb.message.text.html if cb.message and cb.message.text
-                else "Select the episodes to process:",
-                keyboards.episodes_menu(job.id, s.get("matches") or [],
-                                        s.get("selected") or []))
+    from bot.ui.panels import episodes_panel
+    from bot.utils.matching import MatchConfidence
+    fresh_matches = s.get("matches") or []
+    fresh_selected = s.get("selected") or []
+    await _edit(
+        cb,
+        episodes_panel(
+            folder_name=str(s.get("folder_name") or "torrent"),
+            n_videos=len(fresh_matches),
+            n_subs=len(s.get("subs") or []),
+            n_selected=len(fresh_selected),
+            n_uncertain=sum(
+                1 for m in fresh_matches
+                if m.get("confidence") == MatchConfidence.UNCERTAIN.value
+            ),
+        ),
+        keyboards.episodes_menu(job.id, fresh_matches, fresh_selected),
+    )

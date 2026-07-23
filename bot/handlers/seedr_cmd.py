@@ -34,20 +34,24 @@ async def cmd_seedr(_: Client, message: Message) -> None:
         await status.edit_text(f"⚠️ Seedr error: {exc}")
         return
 
-    lines = ["<b>🌱 Seedr account</b>", ""]
+    from bot.ui.panels import SEP, bar
+    lines = ["🌱 <b>SEEDR ACCOUNT</b>", SEP]
     if total:
         pct = used / total * 100
-        lines.append(f"<b>Storage:</b> {human_size(used)} / "
-                     f"{human_size(total)} ({pct:.0f}%)")
+        lines += [
+            f"💾 {human_size(used)} / {human_size(total)}",
+            f"<code>{bar(pct)}</code>  <b>{pct:.0f}%</b>",
+        ]
     if listing.torrents:
-        lines += ["", "<b>Active transfers</b>"]
+        lines += ["", "⏬ <b>ACTIVE TRANSFERS</b>", SEP]
         for t in listing.torrents[:10]:
-            lines.append(f"⏬ {t.name[:45]} — {t.progress:.0f}%")
+            lines.append(f"🧲 {t.name[:40]}")
+            lines.append(f"<code>{bar(t.progress)}</code>  {t.progress:.0f}%")
     if listing.folders:
-        lines += ["", "<b>Folders</b>"]
+        lines += ["", "📁 <b>FOLDERS</b>", SEP]
         for f in listing.folders[:10]:
-            lines.append(f"📁 {f.name[:45]} ({human_size(f.size)})")
+            lines.append(f"📂 {f.name[:40]} · {human_size(f.size)}")
     if not listing.torrents and not listing.folders:
-        lines.append("\n<i>No transfers or folders.</i>")
-    lines += ["", "Send a magnet link to start a hardsub job."]
+        lines.append("<i>😴 No transfers or folders.</i>")
+    lines += ["", "🧲 Send a magnet link to start a hardsub job."]
     await status.edit_text("\n".join(lines), parse_mode=enums.ParseMode.HTML)

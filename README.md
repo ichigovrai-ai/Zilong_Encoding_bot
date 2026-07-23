@@ -115,7 +115,40 @@ Seedr password and signed Seedr URLs in every log record.
 ```
 
 Sending a **video**, **direct http(s) link**, **magnet link** or **.torrent
-file** with no command opens the action menu automatically.
+file** with no command opens the action menu automatically. Sending a video
+*with* a command as its caption (e.g. `/hardsub`) jumps straight into that
+wizard.
+
+## Emoji progress panels
+
+Every stage renders a live, phone-safe emoji panel (edited in place,
+rate-limited, FloodWait-tolerant):
+
+```
+⚙️ ENCODING  pass 2/2
+──────────────────────
+📄 [Erai-raws] Episode 03 [1080p].mkv
+🎯 libx265 · 1280×720 · CRF 24 · preset medium
+
+✅ Download  ·  ✅ Analyse
+✅ Subtitles  ·  🔄 Encode
+▫️ Upload
+
+▰▰▰▰▱▱▱▱▱▱  43.7%
+🎞 12:48 / 29:31 · ⚡ 1.70×
+🎬 41 fps · 📦 184.0 MB so far
+⏳ ETA 09:13 · ⏱ 07:32
+```
+
+- **Stage checklist** (✅ done · 🔄 active · ▫️ pending · ❌ failed · 🛑
+  cancelled) on every download/subtitle/encode/upload panel; the Seedr flow
+  gets its own Magnet → Seedr cloud → Match subs → Episodes track.
+- **Speed emojis**: 🐌 stalled → 🐢 slow → 🔥 normal → ⚡ fast → 🚀 very fast
+  → 🌪️ blazing (and a × realtime scale for encodes).
+- **Three panel styles**, cycled per-user in /settings: `Compact` (▰▱),
+  `Blocks` (█░) and `Accent` (━╌). /settings also toggles upload mode
+  (🤖 auto / 🎬 video / 📁 document), stored per user in SQLite.
+- ETA is only shown when it can actually be computed — never faked.
 
 ## Architecture
 

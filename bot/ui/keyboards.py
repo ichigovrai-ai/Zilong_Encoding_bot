@@ -34,19 +34,22 @@ def action_menu(job_id: str, has_subtitle_streams: bool) -> InlineKeyboardMarkup
 
 
 def resolution_menu(job_id: str, src_short: int = 0) -> InlineKeyboardMarkup:
+    icons = {360: "📱", 480: "📺", 720: "💻", 1080: "🖥", 1440: "🎞", 2160: "🍿"}
+
     def label(name: str, target: int) -> str:
+        prefix = icons.get(target, "")
         if src_short and target > src_short:
-            return f"{name} ⤴"       # would upscale — flagged
-        return name
+            return f"{prefix} {name} ⤴"     # would upscale — flagged
+        return f"{prefix} {name}"
     rows = [
         [_btn(label("360p", 360), "r", job_id, "360"),
          _btn(label("480p", 480), "r", job_id, "480")],
         [_btn(label("720p", 720), "r", job_id, "720"),
          _btn(label("1080p", 1080), "r", job_id, "1080")],
         [_btn(label("1440p", 1440), "r", job_id, "1440"),
-         _btn(label("2160p", 2160), "r", job_id, "2160")],
-        [_btn("Original", "r", job_id, "orig"),
-         _btn("Custom…", "r", job_id, "cust")],
+         _btn(label("2160p / 4K", 2160), "r", job_id, "2160")],
+        [_btn("♻️ Original", "r", job_id, "orig"),
+         _btn("📐 Custom…", "r", job_id, "cust")],
         _nav_row(job_id),
     ]
     return InlineKeyboardMarkup(rows)
@@ -54,40 +57,40 @@ def resolution_menu(job_id: str, src_short: int = 0) -> InlineKeyboardMarkup:
 
 def upscale_confirm_menu(job_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [_btn("⤴ Upscale anyway", "u", job_id, "yes")],
-        [_btn("Keep original size", "u", job_id, "no")],
+        [_btn("⤴️ Upscale anyway", "u", job_id, "yes")],
+        [_btn("↩️ Keep original size", "u", job_id, "no")],
         _nav_row(job_id),
     ])
 
 
 def codec_menu(job_id: str, av1_available: bool) -> InlineKeyboardMarkup:
     rows = [
-        [_btn("H.264", "c", job_id, "x264")],
-        [_btn("H.265 / HEVC", "c", job_id, "x265")],
+        [_btn("🎯 H.264", "c", job_id, "x264")],
+        [_btn("🚀 H.265 / HEVC", "c", job_id, "x265")],
     ]
     if av1_available:
-        rows.append([_btn("AV1", "c", job_id, "av1")])
-    rows.append([_btn("Copy (no re-encode)", "c", job_id, "copy")])
+        rows.append([_btn("🧪 AV1", "c", job_id, "av1")])
+    rows.append([_btn("📋 Copy (no re-encode)", "c", job_id, "copy")])
     rows.append(_nav_row(job_id))
     return InlineKeyboardMarkup(rows)
 
 
 def quality_menu(job_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [_btn("Small size", "q", job_id, "small"),
-         _btn("Balanced", "q", job_id, "bal")],
-        [_btn("High quality", "q", job_id, "high")],
-        [_btn("Custom CRF…", "q", job_id, "crf"),
-         _btn("Target file size…", "q", job_id, "size")],
+        [_btn("🤏 Small size", "q", job_id, "small"),
+         _btn("⚖️ Balanced", "q", job_id, "bal")],
+        [_btn("💎 High quality", "q", job_id, "high")],
+        [_btn("🎛 Custom CRF…", "q", job_id, "crf"),
+         _btn("🎯 Target size…", "q", job_id, "size")],
         _nav_row(job_id),
     ])
 
 
 def subtitle_menu(job_id: str, has_embedded: bool) -> InlineKeyboardMarkup:
-    rows = [[_btn("No subtitles", "s", job_id, "none")]]
+    rows = [[_btn("🚫 No subtitles", "s", job_id, "none")]]
     if has_embedded:
-        rows.append([_btn("Use embedded subtitle", "s", job_id, "emb")])
-    rows.append([_btn("Upload subtitle…", "s", job_id, "upl")])
+        rows.append([_btn("📦 Use embedded subtitle", "s", job_id, "emb")])
+    rows.append([_btn("📤 Upload subtitle…", "s", job_id, "upl")])
     rows.append(_nav_row(job_id))
     return InlineKeyboardMarkup(rows)
 
@@ -158,6 +161,18 @@ def subtitle_pick_menu(job_id: str, episode_idx: int,
                       f"{episode_idx}:-1")])
     rows.append(_nav_row(job_id))
     return InlineKeyboardMarkup(rows)
+
+
+def settings_menu(panel_style: str, upload_mode: str) -> InlineKeyboardMarkup:
+    """User preferences — settings callbacks carry no job id."""
+    from bot.services.user_settings import UPLOAD_MODE_LABELS
+    from bot.ui.panels import style_label
+    return InlineKeyboardMarkup([
+        [_btn(f"🎨 Panel style: {style_label(panel_style)}", "st", "", "style")],
+        [_btn(f"📤 Upload as: "
+              f"{UPLOAD_MODE_LABELS.get(upload_mode, '🤖 Auto')}",
+              "st", "", "upload")],
+    ])
 
 
 def extract_menu(job_id: str, n_subs: int, n_audio: int) -> InlineKeyboardMarkup:
