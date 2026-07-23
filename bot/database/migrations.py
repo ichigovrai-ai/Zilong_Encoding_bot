@@ -59,6 +59,19 @@ MIGRATIONS: list[str] = [
         builtin INTEGER NOT NULL DEFAULT 0
     );
     """,
+    # v2 — paid, time-limited access grants (subscriptions)
+    """
+    CREATE TABLE subscriptions (
+        user_id     INTEGER PRIMARY KEY,
+        username    TEXT NOT NULL DEFAULT '',
+        granted_by  INTEGER NOT NULL,
+        granted_at  REAL NOT NULL,
+        expires_at  REAL NOT NULL,
+        note        TEXT NOT NULL DEFAULT '',
+        created_at  REAL NOT NULL
+    );
+    CREATE INDEX idx_subscriptions_expiry ON subscriptions(expires_at);
+    """,
 ]
 
 

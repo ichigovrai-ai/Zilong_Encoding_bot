@@ -20,6 +20,7 @@ _URL_RE = re.compile(r"https?://\S+", re.I)
     "start", "help", "encode", "compress", "convert", "hardsub", "seedr",
     "mediainfo", "extract", "extractsub", "extractaudio", "convertsub",
     "presets", "settings", "queue", "status", "cancel", "history",
+    "grant", "revoke", "subs", "subscriptions", "access", "myaccess",
 ]), group=2)
 async def on_text(_: Client, message: Message) -> None:
     rt = get_runtime()

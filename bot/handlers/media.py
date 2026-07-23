@@ -136,7 +136,7 @@ async def start_convertsub(rt, message: Message, suffix: str) -> None:
 
     refusal = await intake.check_access(rt, message)
     if refusal:
-        await message.reply_text(refusal)
+        await message.reply_text(refusal, parse_mode=enums.ParseMode.HTML)
         return
     if (message.document.file_size or 0) > _MAX_SUB_BYTES:
         await message.reply_text("⚠️ Subtitle file is too large.")

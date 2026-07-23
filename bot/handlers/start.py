@@ -28,7 +28,17 @@ async def cmd_start(_: Client, message: Message) -> None:
 
 @Client.on_message(filters.command("help") & filters.private)
 async def cmd_help(_: Client, message: Message) -> None:
-    await message.reply_text(messages.HELP, parse_mode=enums.ParseMode.HTML)
+    rt = get_runtime()
+    text = messages.HELP
+    if message.from_user and message.from_user.id == rt.config.owner_id:
+        text += (
+            "\n\n👑 <b>OWNER — PAID ACCESS</b>\n"
+            "<code>/grant &lt;id|@user&gt; &lt;days&gt; [note]</code> — grant/extend access\n"
+            "<code>/revoke &lt;id|@user&gt;</code> — remove access\n"
+            "<code>/subs</code> — list active subscribers\n"
+            "<i>Set SUBSCRIPTION_MODE=1 to restrict the bot to paid users.</i>"
+        )
+    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
 
 
 @Client.on_message(filters.command("presets") & filters.private)

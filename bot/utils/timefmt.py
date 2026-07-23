@@ -11,6 +11,25 @@ def human_size(n: float | int) -> str:
     return f"{n:.1f} TB"
 
 
+def fmt_date(ts: float) -> str:
+    """UTC calendar date+time for grant expiries, e.g. '2026-08-22 14:30 UTC'."""
+    import time as _time
+    return _time.strftime("%Y-%m-%d %H:%M UTC", _time.gmtime(max(0, ts)))
+
+
+def fmt_days(seconds_left: float) -> str:
+    """Human 'time remaining' for a subscription, e.g. '12d 3h' or '5h 20m'."""
+    seconds_left = max(0, int(seconds_left))
+    d, rem = divmod(seconds_left, 86400)
+    h, rem = divmod(rem, 3600)
+    m, _ = divmod(rem, 60)
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    return f"{m}m"
+
+
 def fmt_hms(secs: float | int) -> str:
     secs = max(0, int(secs))
     h, rem = divmod(secs, 3600)

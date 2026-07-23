@@ -23,13 +23,14 @@ log = logging.getLogger(__name__)
 
 async def check_access(rt: Runtime, message: Any) -> str | None:
     """None if the user may proceed, else the refusal text."""
+    from bot.services.access import access_denial_reason
     user = message.from_user
     if user is None:
         return "This bot only works in direct messages."
-    if not rt.config.is_authorized(user.id):
-        return "⛔ You are not authorised to use this bot."
-    reason = await rt.manager.user_can_submit(user.id)
-    return reason
+    denied = await access_denial_reason(rt, user.id)
+    if denied:
+        return denied
+    return await rt.manager.user_can_submit(user.id)
 
 
 def probe_to_options(media: MediaInfo | None, real_size: int) -> dict[str, Any]:
@@ -85,7 +86,7 @@ async def intake_media(rt: Runtime, message: Any, *,
     """A Telegram video/document arrived (or a command replied to one)."""
     refusal = await check_access(rt, message)
     if refusal:
-        await message.reply_text(refusal)
+        await message.reply_text(refusal, parse_mode=enums.ParseMode.HTML)
         return
 
     media_obj = message.video or message.document
@@ -185,7 +186,7 @@ async def intake_url(rt: Runtime, message: Any, url: str) -> None:
     from bot.utils.validation import ValidationError, validate_download_url
     refusal = await check_access(rt, message)
     if refusal:
-        await message.reply_text(refusal)
+        await message.reply_text(refusal, parse_mode=enums.ParseMode.HTML)
         return
     try:
         url = validate_download_url(url)
@@ -235,7 +236,7 @@ async def intake_magnet(rt: Runtime, message: Any, magnet: str) -> None:
 
     refusal = await check_access(rt, message)
     if refusal:
-        await message.reply_text(refusal)
+        await message.reply_text(refusal, parse_mode=enums.ParseMode.HTML)
         return
     if not rt.config.seedr_enabled:
         await message.reply_text(

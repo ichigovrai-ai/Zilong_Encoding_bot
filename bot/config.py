@@ -37,6 +37,9 @@ class Config:
     owner_id: int
     authorized_users: tuple[int, ...] = ()
     owner_only: bool = False
+    # When on, only the owner, the AUTHORIZED_USERS allowlist, and users with
+    # an active paid grant may use the bot. Off = current public behaviour.
+    subscription_mode: bool = False
 
     # Paths
     work_dir: Path = Path("work")
@@ -172,6 +175,8 @@ class Config:
             owner_id=owner_id,
             authorized_users=_split_ids(opt("AUTHORIZED_USERS")),
             owner_only=opt("OWNER_ONLY", "0").lower() in ("1", "true", "yes"),
+            subscription_mode=opt("SUBSCRIPTION_MODE", "0").lower()
+            in ("1", "true", "yes"),
             work_dir=Path(opt("WORK_DIR", "work")),
             download_dir=Path(opt("DOWNLOAD_DIR", "downloads")),
             database_path=Path(opt("DATABASE_PATH", "data/bot.db")),
