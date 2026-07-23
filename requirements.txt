@@ -1,0 +1,12 @@
+# Runtime dependencies — pinned to versions verified together.
+# PyroFork (imports as `pyrogram`) — NOT upstream Pyrogram.
+pyrofork==2.3.69
+# TgCrypto: C speedup for MTProto. Wheels exist for Linux/macOS; on Windows a
+# build toolchain is needed, so it is skipped there (pyrofork falls back to
+# pure-Python crypto with a startup warning).
+TgCrypto==1.2.5; sys_platform != "win32"
+# uvloop: faster event loop, Linux/macOS only.
+uvloop==0.22.1; sys_platform != "win32"
+aiohttp==3.14.1
+aiosqlite==0.21.0
+python-dotenv==1.2.2

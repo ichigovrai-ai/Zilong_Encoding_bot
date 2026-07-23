@@ -1,0 +1,578 @@
+"""Job execution pipeline.
+
+One `run_job` task per job. Stages transition through the state machine and
+check the cancel token between steps. Every failure path produces a
+user-facing message; full details go to the log only.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from pathlib import Path
+
+from bot.jobs.models import InputType, Job, JobKind
+from bot.jobs.states import TERMINAL, JobStatus
+from bot.runtime import Runtime, get_runtime
+from bot.services.download import (
+    DownloadError, download_telegram_media, download_url,
+)
+from bot.services.encoding import EncodePlan
+from bot.services.extraction import ExtractionError, extract_text_subtitle
+from bot.services.ffmpeg import (
+    FFmpegError, build_encode_args, run_ffmpeg_with_progress,
+)
+from bot.services.ffprobe import MediaInfo, ProbeError, probe_media
+from bot.services.fonts import extract_fonts, missing_font_warnings
+from bot.services.mediainfo import render_mediainfo
+from bot.services.planner import plan_from_options
+from bot.services.seedr import SeedrClient, SeedrError
+from bot.services.subtitles import (
+    SubtitleError, UntimedSubtitleError, ass_referenced_fonts,
+    prepare_subtitle_file,
+)
+from bot.services.thumbnail import make_thumbnail
+from bot.services.upload import (
+    UploadError, build_caption, should_send_as_video, upload_file,
+)
+from bot.ui import keyboards, messages
+from bot.utils.filenames import build_output_name, unique_path
+from bot.utils.matching import (
+    SUBTITLE_EXTS, VIDEO_EXTS, MatchConfidence, match_subtitles,
+)
+from bot.utils.paths import free_disk_bytes
+from bot.utils.progress import ProgressReporter
+from bot.utils.subprocesses import CancelToken
+from bot.utils.validation import ValidationError
+
+log = logging.getLogger(__name__)
+
+# Errors whose message is safe and useful to show the user directly.
+USER_ERRORS = (ValidationError, SubtitleError, DownloadError, SeedrError,
+               ProbeError, ExtractionError, UploadError)
+
+
+async def run_job(job_id: str, token: CancelToken) -> None:
+    rt = get_runtime()
+    job = await rt.repo.get(job_id)
+    if job is None or job.status in TERMINAL:
+        return
+    reporter = ProgressReporter(
+        rt.client, job.chat_id, job.status_msg_id,
+        rt.config.progress_update_interval,
+    )
+    started = time.monotonic()
+    try:
+        if job.cancel_requested:
+            raise asyncio.CancelledError
+        timeout = rt.config.job_timeout_hours * 3600
+        if job.kind == JobKind.SEEDR_HARDSUB and job.input_type == InputType.MAGNET:
+            timeout = max(timeout, rt.config.seedr_timeout_hours * 3600 + 3600)
+            await asyncio.wait_for(
+                _run_seedr_parent(rt, job, token, reporter), timeout=timeout
+            )
+        else:
+            await asyncio.wait_for(
+                _run_pipeline(rt, job, token, reporter, started), timeout=timeout
+            )
+    except (asyncio.CancelledError, asyncio.TimeoutError) as exc:
+        cancelled = token.cancelled or job.cancel_requested
+        if isinstance(exc, asyncio.TimeoutError) and not cancelled:
+            await _finalise(rt, job_id, reporter, JobStatus.FAILED,
+                            "The job exceeded the maximum allowed runtime.")
+        elif cancelled:
+            await _finalise(rt, job_id, reporter, JobStatus.CANCELLED, "")
+        else:
+            await _finalise(rt, job_id, reporter, JobStatus.FAILED,
+                            "The job was interrupted by a bot shutdown.")
+    except FFmpegError as exc:
+        log.error("Job %s FFmpeg failure: %s\n%s", job_id, exc, exc.stderr_tail)
+        await _finalise(rt, job_id, reporter, JobStatus.FAILED,
+                        f"FFmpeg failed: {exc}\n\nLast output:\n{exc.stderr_tail[-600:]}")
+    except UntimedSubtitleError:
+        await _finalise(rt, job_id, reporter, JobStatus.FAILED,
+                        "The subtitle file has no usable timestamps "
+                        "(plain text). Send a timed subtitle and try again.")
+    except USER_ERRORS as exc:
+        log.warning("Job %s failed: %s", job_id, exc)
+        await _finalise(rt, job_id, reporter, JobStatus.FAILED, str(exc))
+    except Exception:  # noqa: BLE001
+        log.exception("Job %s crashed", job_id)
+        await _finalise(rt, job_id, reporter, JobStatus.FAILED,
+                        "An internal error occurred. The details were logged.")
+
+
+async def _finalise(rt: Runtime, job_id: str, reporter: ProgressReporter,
+                    status: JobStatus, error: str) -> None:
+    """Terminal bookkeeping: transition, panel update, cleanup, Seedr cleanup."""
+    from bot.services.cleanup import cleanup_job_dir
+    try:
+        job = await rt.repo.get(job_id)
+        if job and job.status not in TERMINAL:
+            job = await rt.repo.transition(job_id, status, error=error)
+        if job:
+            if status == JobStatus.FAILED:
+                await reporter.update(messages.error_text(job), force=True)
+            elif status == JobStatus.CANCELLED:
+                await reporter.update(
+                    f"🚫 <b>Cancelled</b> — <code>{job.input_name[:50]}</code>",
+                    force=True,
+                )
+    except Exception:  # noqa: BLE001
+        log.exception("Finalise transition failed for %s", job_id)
+    try:
+        await cleanup_job_dir(rt.repo, rt.config.work_dir, job_id)
+    except Exception:  # noqa: BLE001
+        log.exception("Finalise cleanup failed for %s", job_id)
+    try:
+        await _maybe_delete_seedr_folder(rt, job_id)
+    except Exception:  # noqa: BLE001
+        log.exception("Seedr folder cleanup failed for %s", job_id)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Standard pipeline: download → probe → subtitles → encode → upload
+# ═════════════════════════════════════════════════════════════════════════
+
+async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
+                        reporter: ProgressReporter, started: float) -> None:
+    cfg = rt.config
+    work = Path(job.work_dir)
+    if not work.exists():
+        from bot.utils.paths import create_job_dirs
+        work = create_job_dirs(cfg.work_dir, job.user_id, job.id)
+        await rt.repo.update_fields(job.id, work_dir=str(work))
+
+    if free_disk_bytes(cfg.work_dir) < cfg.min_free_disk_gb * 1024**3:
+        raise ValidationError(
+            "Not enough free disk space on the server — try again later."
+        )
+
+    # ── 1. Acquire input ────────────────────────────────────────────────
+    await rt.repo.transition(job.id, JobStatus.DOWNLOADING, stage="downloading")
+    async with rt.manager.download_sem:
+        token.raise_if_cancelled()
+        input_path = await _acquire_input(rt, job, work, token, reporter)
+    token.raise_if_cancelled()
+
+    # ── 2. Probe ────────────────────────────────────────────────────────
+    await rt.repo.transition(job.id, JobStatus.PROBING, stage="probing")
+    await reporter.update(f"🔎 Analysing <code>{job.input_name[:50]}</code>…",
+                          reply_markup=keyboards.cancel_only(job.id))
+    media = await probe_media(str(input_path), ffprobe=cfg.ffprobe_path)
+
+    if job.kind == JobKind.MEDIAINFO:
+        await reporter.update(render_mediainfo(media, job.input_name), force=True)
+        await rt.repo.transition(job.id, JobStatus.COMPLETED)
+        return
+
+    if job.kind == JobKind.EXTRACT:
+        await _run_extract(rt, job, media, input_path, work, token, reporter)
+        return
+
+    # ── 3. Subtitles ────────────────────────────────────────────────────
+    plan_result = plan_from_options(
+        job.options, media,
+        default_codec=cfg.default_video_codec,
+        default_preset=cfg.default_preset,
+        default_crf=cfg.default_crf,
+        capabilities=rt.capabilities,
+    )
+    plan = plan_result.plan
+    warnings = list(plan_result.warnings)
+
+    if plan.subtitle_mode in ("hard", "soft"):
+        await rt.repo.transition(job.id, JobStatus.PREPARING_SUBTITLES,
+                                 stage="subtitles")
+        await reporter.update("💬 Preparing subtitles…",
+                              reply_markup=keyboards.cancel_only(job.id))
+        warnings += await _prepare_subtitles(rt, job, media, input_path,
+                                             work, plan, token)
+    token.raise_if_cancelled()
+
+    # ── 4. Encode ───────────────────────────────────────────────────────
+    await rt.repo.transition(job.id, JobStatus.ENCODING, stage="encoding")
+    out_name = build_output_name(
+        job.input_name, height=plan.target_height_label,
+        codec=plan.video_codec, container=plan.container,
+        hardsub=plan.subtitle_mode == "hard",
+    )
+    output_path = unique_path(work / "output" / out_name)
+    async with rt.manager.encode_sem:
+        token.raise_if_cancelled()
+        await _run_encode(rt, job, plan, media, input_path, output_path,
+                          work, token, reporter, started)
+    await rt.repo.update_fields(job.id, output_path=str(output_path))
+
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise FFmpegError("Encoding produced no output file.")
+    out_size = output_path.stat().st_size
+    if out_size > cfg.max_output_size:
+        raise ValidationError(
+            f"The encoded file ({out_size // 1024**2} MB) exceeds the "
+            f"configured output limit ({cfg.max_output_size // 1024**2} MB)."
+        )
+
+    # ── 5. Upload ───────────────────────────────────────────────────────
+    await rt.repo.transition(job.id, JobStatus.UPLOADING, stage="uploading")
+    out_media: MediaInfo | None = None
+    try:
+        out_media = await probe_media(str(output_path), ffprobe=cfg.ffprobe_path)
+    except ProbeError:
+        log.warning("Output probe failed for %s — uploading anyway", job.id)
+    thumb = await make_thumbnail(
+        str(output_path), work / "output",
+        out_media.duration if out_media else media.duration,
+        ffmpeg=cfg.ffmpeg_path, cancel_token=token,
+    )
+
+    async def _upl_progress(done: int, total: int) -> None:
+        await rt.repo.update_fields(job.id, progress=done / total * 100 if total else 0)
+        await reporter.update(messages.transfer_progress(
+            "Uploading to Telegram", output_path.name, done, total, "⬆️"),
+            reply_markup=keyboards.cancel_only(job.id))
+
+    elapsed = time.monotonic() - started
+    caption = build_caption(
+        original_name=job.input_name, out_path=output_path,
+        media=out_media, plan_summary=plan.summary(), encode_seconds=elapsed,
+        template=str(job.options.get("caption_template", "")),
+    )
+    if warnings:
+        caption = caption[:900] + "\n⚠️ " + "; ".join(warnings)[:120]
+
+    async with rt.manager.upload_sem:
+        token.raise_if_cancelled()
+        await upload_file(
+            rt.client, job.chat_id, output_path,
+            media=out_media, caption=caption, thumb=thumb,
+            as_video=should_send_as_video(
+                output_path, out_media, str(job.options.get("upload_as", "auto"))
+            ),
+            progress_cb=_upl_progress,
+            cancelled=lambda: token.cancelled,
+        )
+
+    await rt.repo.transition(job.id, JobStatus.COMPLETED, stage="done")
+    await reporter.update(
+        messages.completed_text(job, time.monotonic() - started, out_size),
+        force=True,
+    )
+    from bot.services.cleanup import cleanup_job_dir
+    await cleanup_job_dir(rt.repo, cfg.work_dir, job.id)
+    await _maybe_delete_seedr_folder(rt, job.id)
+
+
+async def _acquire_input(rt: Runtime, job: Job, work: Path,
+                         token: CancelToken, reporter: ProgressReporter) -> Path:
+    cfg = rt.config
+    suffix = Path(job.input_name).suffix.lower()
+    if suffix not in VIDEO_EXTS:
+        suffix = ".mkv" if job.input_type != InputType.URL else (suffix or ".mp4")
+    dest = work / "input" / f"input{suffix}"
+
+    async def _dl_progress(done: int, total: int) -> None:
+        pct = done / total * 100 if total else 0.0
+        await rt.repo.update_fields(job.id, progress=pct)
+        await reporter.update(messages.transfer_progress(
+            "Downloading", job.input_name, done, total),
+            reply_markup=keyboards.cancel_only(job.id))
+
+    if job.input_type in (InputType.TG_VIDEO, InputType.TG_DOCUMENT):
+        src_msg_id = int(job.options.get("src_msg_id", 0))
+        if not src_msg_id:
+            raise DownloadError("The original message reference was lost.")
+        message = await rt.client.get_messages(job.chat_id, src_msg_id)
+        if message is None or getattr(message, "empty", False):
+            raise DownloadError("The original file message was deleted.")
+        return await download_telegram_media(
+            rt.client, message, dest, max_bytes=cfg.max_input_size,
+            progress_cb=_dl_progress, cancel_token=token,
+        )
+
+    if job.input_type == InputType.URL:
+        return await download_url(
+            job.input_ref, dest, max_bytes=cfg.max_input_size,
+            progress_cb=_dl_progress, cancel_token=token,
+        )
+
+    if job.input_type == InputType.SEEDR_FILE:
+        async with SeedrClient(cfg.seedr_username, cfg.seedr_password) as sc:
+            url = await sc.fetch_file_url(int(job.input_ref))
+            path = await download_url(
+                url, dest, max_bytes=cfg.max_input_size,
+                progress_cb=_dl_progress, cancel_token=token,
+            )
+            sub_id = job.seedr.get("sub_id")
+            if sub_id:
+                sub_name = str(job.seedr.get("sub_name") or "sub.ass")
+                sub_suffix = Path(sub_name).suffix.lower() or ".ass"
+                sub_url = await sc.fetch_file_url(int(sub_id))
+                await download_url(
+                    sub_url, work / "subtitles" / f"raw_sub{sub_suffix}",
+                    max_bytes=64 * 1024**2, cancel_token=token,
+                )
+                job.options["subtitle_file"] = str(
+                    work / "subtitles" / f"raw_sub{sub_suffix}"
+                )
+                await rt.repo.update_fields(job.id, options=job.options)
+        return path
+
+    raise DownloadError(f"Unsupported input type: {job.input_type}")
+
+
+async def _prepare_subtitles(rt: Runtime, job: Job, media: MediaInfo,
+                             input_path: Path, work: Path, plan: EncodePlan,
+                             token: CancelToken) -> list[str]:
+    """Resolve the subtitle source into plan.subtitle_path (+fonts)."""
+    cfg = rt.config
+    warnings: list[str] = []
+    fps = media.main_video.fps if media.main_video else 23.976
+    sub_source = str(job.options.get("subtitle_source", ""))
+    raw_path: str = ""
+
+    if sub_source == "embedded":
+        idx = int(job.options.get("subtitle_stream", 0))
+        stream = next((s for s in media.subtitles if s.type_index == idx), None)
+        if stream is None:
+            raise SubtitleError(f"Embedded subtitle stream #{idx} was not found.")
+        raw_path = await extract_text_subtitle(
+            str(input_path), stream, work / "subtitles",
+            ffmpeg=cfg.ffmpeg_path, cancel_token=token,
+        )
+    else:
+        raw_path = str(job.options.get("subtitle_file", ""))
+        if not raw_path or not Path(raw_path).exists():
+            raise SubtitleError("The subtitle file is missing — upload it again.")
+
+    prepared = prepare_subtitle_file(raw_path, work / "subtitles", fps=fps)
+    warnings += prepared.report.warnings
+    plan.subtitle_path = _relpath_for_filter(Path(prepared.path), work)
+
+    # Fonts: only relevant for ASS burns from containers with attachments.
+    if plan.subtitle_mode == "hard" and prepared.format.value == "ass":
+        extracted = await extract_fonts(
+            str(input_path), work / "fonts", media,
+            ffmpeg=cfg.ffmpeg_path, cancel_token=token,
+        )
+        if extracted:
+            plan.fonts_dir = "fonts"
+        referenced = ass_referenced_fonts(
+            Path(prepared.path).read_text(encoding="utf-8", errors="replace")
+        )
+        warnings += missing_font_warnings(referenced, extracted, cfg.fallback_font)
+    return warnings
+
+
+def _relpath_for_filter(path: Path, work: Path) -> str:
+    """FFmpeg runs with cwd=work, so filter paths are short relative POSIX
+    paths — immune to Windows drive colons and Unicode filename issues."""
+    try:
+        return path.relative_to(work).as_posix()
+    except ValueError:
+        return str(path)
+
+
+async def _run_encode(rt: Runtime, job: Job, plan: EncodePlan, media: MediaInfo,
+                      input_path: Path, output_path: Path, work: Path,
+                      token: CancelToken, reporter: ProgressReporter,
+                      started: float) -> None:
+    cfg = rt.config
+    duration = media.duration or 1.0
+    rel_input = _relpath_for_filter(input_path, work)
+    rel_output = _relpath_for_filter(output_path, work)
+    extra_inputs: list[str] = []
+    if plan.subtitle_mode == "soft" and plan.subtitle_path:
+        extra_inputs.append(plan.subtitle_path)
+
+    passes: list[int] = [1, 2] if plan.two_pass else [0]
+    for i, pass_num in enumerate(passes):
+        base_pct = 50.0 * i if plan.two_pass else 0.0
+        scale = 50.0 if plan.two_pass else 100.0
+
+        async def _on_progress(p) -> None:
+            pct = base_pct + p.percent * scale / 100
+            await rt.repo.update_fields(job.id, progress=pct)
+            await reporter.update(
+                messages.encode_progress(
+                    job, pct=pct, done_s=p.out_time_s, total_s=duration,
+                    speed=p.speed, fps=p.fps, est_size=p.total_size,
+                    elapsed=time.monotonic() - started, eta=p.eta_s,
+                ),
+                reply_markup=keyboards.cancel_only(job.id),
+            )
+
+        args = build_encode_args(
+            plan, rel_input, rel_output,
+            ffmpeg=cfg.ffmpeg_path, pass_num=pass_num,
+            passlog="logs/ffpass", extra_inputs=extra_inputs,
+        )
+        await run_ffmpeg_with_progress(
+            args, duration_s=duration, on_progress=_on_progress,
+            cancel_token=token, cwd=str(work),
+            timeout=cfg.job_timeout_hours * 3600,
+        )
+
+
+async def _run_extract(rt: Runtime, job: Job, media: MediaInfo,
+                       input_path: Path, work: Path, token: CancelToken,
+                       reporter: ProgressReporter) -> None:
+    """Extract subtitle/audio streams and send them as documents."""
+    from bot.services.extraction import extract_audio
+    cfg = rt.config
+    target = str(job.options.get("extract_target", "subtitles"))
+    sent = 0
+    if target == "subtitles":
+        streams = [s for s in media.subtitles if not s.is_bitmap]
+        if not streams:
+            raise ExtractionError(
+                "No text subtitle streams found (bitmap PGS/VobSub streams "
+                "cannot be converted without OCR)."
+            )
+        for stream in streams[:10]:
+            token.raise_if_cancelled()
+            path = await extract_text_subtitle(
+                str(input_path), stream, work / "output",
+                ffmpeg=cfg.ffmpeg_path, cancel_token=token,
+            )
+            label = f"{Path(job.input_name).stem}.{stream.language}" \
+                    f".{stream.type_index}{Path(path).suffix}"
+            await rt.client.send_document(
+                job.chat_id, path, file_name=label,
+                caption=f"💬 {stream.language} · {stream.codec}",
+            )
+            sent += 1
+    else:
+        for i, _a in enumerate(media.audio[:6]):
+            token.raise_if_cancelled()
+            path = await extract_audio(
+                str(input_path), i, work / "output",
+                ffmpeg=cfg.ffmpeg_path, cancel_token=token,
+            )
+            await rt.client.send_document(job.chat_id, path)
+            sent += 1
+        if not sent:
+            raise ExtractionError("No audio streams found.")
+    await rt.repo.transition(job.id, JobStatus.COMPLETED)
+    await reporter.update(f"✅ Extracted {sent} stream(s).", force=True)
+    from bot.services.cleanup import cleanup_job_dir
+    await cleanup_job_dir(rt.repo, cfg.work_dir, job.id)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Seedr parent flow: magnet → poll → browse → match → wait for selection
+# ═════════════════════════════════════════════════════════════════════════
+
+async def _run_seedr_parent(rt: Runtime, job: Job, token: CancelToken,
+                            reporter: ProgressReporter) -> None:
+    cfg = rt.config
+    if not cfg.seedr_enabled:
+        raise SeedrError("Seedr is not configured on this bot "
+                         "(SEEDR_USERNAME / SEEDR_PASSWORD).")
+    await rt.repo.transition(job.id, JobStatus.DOWNLOADING, stage="seedr_add")
+    await reporter.update("🌱 Adding magnet to Seedr…",
+                          reply_markup=keyboards.cancel_only(job.id), force=True)
+
+    async with SeedrClient(cfg.seedr_username, cfg.seedr_password) as sc:
+        known = {f.id for f in (await sc.list_folder(0)).folders}
+        torrent_id = await sc.add_magnet(job.input_ref)
+        name_hint = str(job.options.get("magnet_name", "") or job.input_name)
+
+        last_edit = {"t": 0.0}
+
+        async def _poll_progress(pct: float, name: str) -> None:
+            token.raise_if_cancelled()
+            await rt.repo.update_fields(job.id, progress=pct)
+            now = time.monotonic()
+            if now - last_edit["t"] >= cfg.progress_update_interval:
+                last_edit["t"] = now
+                await reporter.update(
+                    messages.seedr_progress(name or name_hint, pct),
+                    reply_markup=keyboards.cancel_only(job.id),
+                )
+
+        folder = await sc.wait_ready(
+            torrent_id=torrent_id, name_hint=name_hint,
+            known_folder_ids=known,
+            timeout_s=cfg.seedr_timeout_hours * 3600,
+            interval_s=cfg.seedr_poll_interval,
+            progress_cb=_poll_progress, cancel_token=token,
+        )
+
+        await reporter.update("🌱 Torrent complete — reading folder…", force=True)
+        files = await sc.walk_folder(folder.id)
+
+    videos = [f for f in files if Path(f.name).suffix.lower() in VIDEO_EXTS
+              and f.size > 1024 * 1024]
+    subs = [f for f in files if Path(f.name).suffix.lower() in SUBTITLE_EXTS]
+    if not videos:
+        raise SeedrError("No video files were found in this torrent.")
+
+    matches = match_subtitles([v.path for v in videos], [s.path for s in subs])
+    by_path = {f.path: f for f in files}
+    match_dicts = []
+    for m in matches:
+        vfile = by_path[m.video]
+        entry = {
+            "video": m.video, "video_id": vfile.id, "video_size": vfile.size,
+            "video_label": Path(vfile.name).name,
+            "subtitle": m.subtitle,
+            "sub_id": by_path[m.subtitle].id if m.subtitle else None,
+            "confidence": m.confidence.value, "score": m.score,
+        }
+        match_dicts.append(entry)
+
+    job.seedr = {
+        "folder_id": folder.id, "folder_name": folder.name,
+        "torrent_id": torrent_id,
+        "subs": [{"path": s.path, "id": s.id} for s in subs],
+        "matches": match_dicts,
+        "selected": list(range(len(match_dicts))),
+    }
+    await rt.repo.update_fields(job.id, seedr=job.seedr)
+    await rt.repo.transition(job.id, JobStatus.WAITING_FOR_INPUT,
+                             stage="select_episodes")
+
+    n_uncertain = sum(1 for m in match_dicts
+                      if m["confidence"] == MatchConfidence.UNCERTAIN.value)
+    text = (
+        f"🌱 <b>{folder.name[:60]}</b>\n\n"
+        f"Found <b>{len(videos)}</b> video(s) and <b>{len(subs)}</b> "
+        f"subtitle(s).\n"
+    )
+    if n_uncertain:
+        text += (f"⚠️ {n_uncertain} match(es) are uncertain — tap "
+                 f"“pick subtitle…” to fix them.\n")
+    text += "\nSelect the episodes to process:"
+    await reporter.update(
+        text,
+        reply_markup=keyboards.episodes_menu(
+            job.id, match_dicts, job.seedr["selected"]
+        ),
+        force=True,
+    )
+
+
+async def _maybe_delete_seedr_folder(rt: Runtime, job_id: str) -> None:
+    """Delete the Seedr folder once no open job references it."""
+    cfg = rt.config
+    if not (cfg.seedr_enabled and cfg.seedr_auto_delete):
+        return
+    job = await rt.repo.get(job_id)
+    if not job or not job.seedr.get("folder_id"):
+        return
+    folder_id = int(job.seedr["folder_id"])
+    terminal = tuple(str(s) for s in TERMINAL)
+    marks = ", ".join("?" for _ in terminal)
+    row = await rt.db.fetchone(
+        f"SELECT COUNT(*) AS n FROM jobs WHERE status NOT IN ({marks}) "
+        f"AND json_extract(seedr, '$.folder_id') = ?",
+        (*terminal, folder_id),
+    )
+    if row and row["n"] == 0:
+        try:
+            async with SeedrClient(cfg.seedr_username, cfg.seedr_password) as sc:
+                await sc.delete_folder(folder_id)
+            log.info("Deleted Seedr folder %d after job %s", folder_id, job_id)
+        except SeedrError as exc:
+            log.warning("Could not delete Seedr folder %d: %s", folder_id, exc)

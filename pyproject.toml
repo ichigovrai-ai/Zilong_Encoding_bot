@@ -1,0 +1,13 @@
+[project]
+name = "zilong-encoding-bot"
+version = "0.1.0"
+description = "Telegram video encoding / hardsub bot with Seedr magnet workflow"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.setuptools]
+packages = { find = { include = ["bot*"] } }

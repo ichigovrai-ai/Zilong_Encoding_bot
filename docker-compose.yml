@@ -1,0 +1,16 @@
+services:
+  encoding-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bot-data:/app/data
+      - bot-work:/app/work
+    # Give FFmpeg breathing room; adjust to your host.
+    cpus: "2.0"
+    mem_limit: 3g
+    stop_grace_period: 30s
+
+volumes:
+  bot-data:
+  bot-work:
