@@ -317,17 +317,19 @@ async def start_confirmed(rt: Runtime, job: Job) -> str:
     """Final Go pressed. Returns the text to show. Seedr parents spawn child
     jobs; everything else is enqueued."""
     if job.kind == JobKind.SEEDR_HARDSUB and job.input_type == InputType.MAGNET:
-        n = await spawn_seedr_children(rt, job)
+        n, summary = await spawn_seedr_children(rt, job)
         await rt.repo.transition(job.id, JobStatus.COMPLETED,
                                  detail=f"spawned {n} episode job(s)")
-        return (f"🚀 Queued <b>{n}</b> episode job(s). "
-                f"Track them with /queue.")
+        from bot.ui.panels import SEP
+        return (f"🚀 <b>Queued {n} episode(s)</b>\n{SEP}\n"
+                f"{summary}\n\n<i>Using your /settings — track with /queue.</i>")
     await rt.manager.enqueue(job.id)
     return "🚀 Queued. Progress will appear here."
 
 
-async def spawn_seedr_children(rt: Runtime, parent: Job) -> int:
-    """Create one child job per selected episode, inheriting wizard options."""
+async def spawn_seedr_children(rt: Runtime, parent: Job) -> tuple[int, str]:
+    """Create one child job per selected episode using the user's /settings.
+    Returns (count, human summary of the settings applied)."""
     from bot.services.user_settings import get_user_settings, value_of
     try:
         settings = await get_user_settings(rt.db, parent.user_id)
@@ -335,15 +337,28 @@ async def spawn_seedr_children(rt: Runtime, parent: Job) -> int:
         settings = {}
     seedr_hardsub_enabled = value_of(settings, "seedr_hardsub") == "on"
 
+    # Encode options come from the user's saved settings — magnets start
+    # directly, no per-magnet wizard.
+    _res = value_of(settings, "def_resolution")
+    inherited = {
+        "resolution": "orig" if _res == "original" else _res,
+        "codec": value_of(settings, "def_codec"),
+        "quality": "crf",
+        "crf": int(value_of(settings, "def_crf")),
+        "audio": value_of(settings, "def_audio"),
+    }
+    _lang = value_of(settings, "sub_lang")
+    summary = (
+        f"💬 {'🇫🇷' if _lang == 'fr' else _lang.upper()} hardsub · "
+        f"🖥 {_res} · 🎯 {value_of(settings, 'def_codec')} · "
+        f"🎛 CRF {inherited['crf']} · ⏩ {value_of(settings, 'def_preset')}"
+        if seedr_hardsub_enabled else
+        f"🚫 no subs · 🖥 {_res} · 🎯 {value_of(settings, 'def_codec')}"
+    )
+
     s = parent.seedr
     matches: list[dict] = s.get("matches") or []
     selected: list[int] = s.get("selected") or []
-    inherited = {
-        k: v for k, v in parent.options.items()
-        if k in ("resolution", "codec", "quality", "crf", "target_size_mb",
-                 "allow_upscale", "audio", "audio_bitrate", "container",
-                 "preset", "upload_as", "caption_template")
-    }
     count = 0
     for idx in selected:
         if not 0 <= idx < len(matches):
@@ -396,7 +411,7 @@ async def spawn_seedr_children(rt: Runtime, parent: Job) -> int:
         await rt.repo.insert(child)
         await rt.manager.enqueue(child.id)
         count += 1
-    return count
+    return count, summary
 
 
 async def _save(rt: Runtime, job: Job) -> None:

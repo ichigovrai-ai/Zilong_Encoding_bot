@@ -111,12 +111,11 @@ async def on_callback(_: Client, cb: CallbackQuery) -> None:
             if not (job.seedr.get("selected") or []):
                 await cb.answer("Select at least one episode.", show_alert=True)
                 return
-            job.options["step"] = "res"
-            job.options["history"] = []
-            await rt.repo.update_fields(job.id, options=job.options)
-            text, kb = wizard.render(job)
-            await _edit(cb, text, kb)
-            await cb.answer()
+            # Start directly using the user's saved /settings — no per-magnet
+            # resolution/codec/quality wizard.
+            await cb.answer("Starting…")
+            text = await wizard.start_confirmed(rt, job)
+            await _edit(cb, text, keyboards.cancel_only(job.id))
             return
         if step == "confirm":
             await cb.answer("Starting…")
