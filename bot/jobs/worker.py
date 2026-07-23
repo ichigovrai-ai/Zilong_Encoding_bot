@@ -31,7 +31,7 @@ from bot.services.subtitles import (
     SubtitleError, UntimedSubtitleError, ass_referenced_fonts,
     prepare_subtitle_file,
 )
-from bot.services.thumbnail import make_thumbnail
+from bot.services.thumbnail import make_thumbnails
 from bot.services.upload import (
     UploadError, build_caption, should_send_as_video, upload_file,
 )
@@ -278,10 +278,10 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
         out_media = await probe_media(str(output_path), ffprobe=cfg.ffprobe_path)
     except ProbeError:
         log.warning("Output probe failed for %s — uploading anyway", job.id)
-    thumb = await make_thumbnail(
+    thumbs = await make_thumbnails(
         str(output_path), work / "output",
         out_media.duration if out_media else media.duration,
-        ffmpeg=cfg.ffmpeg_path, cancel_token=token,
+        media=out_media, ffmpeg=cfg.ffmpeg_path, cancel_token=token,
     )
 
     upload_started = time.monotonic()
@@ -313,7 +313,8 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
         token.raise_if_cancelled()
         await upload_file(
             rt.client, job.chat_id, output_path,
-            media=out_media, caption=caption, thumb=thumb,
+            media=out_media, caption=caption,
+            thumb=thumbs.thumb, cover=thumbs.cover,
             as_video=should_send_as_video(
                 output_path, out_media,
                 str(job.options.get("upload_as") or upload_pref or "auto"),

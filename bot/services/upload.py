@@ -59,11 +59,20 @@ def build_caption(*, original_name: str, out_path: Path,
     return "\n".join(lines)[:1024]
 
 
+def _send_video_supports_cover(client: Any) -> bool:
+    try:
+        import inspect
+        return "cover" in inspect.signature(client.send_video).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 async def upload_file(
     client: Any, chat_id: int, path: Path, *,
     media: MediaInfo | None,
     caption: str,
     thumb: str | None = None,
+    cover: str | None = None,
     as_video: bool = True,
     progress_cb: ProgressCB | None = None,
     cancelled: Callable[[], bool] | None = None,
@@ -89,6 +98,10 @@ async def upload_file(
     )
     if thumb:
         kwargs["thumb"] = thumb
+    # HD cover poster — only on video sends, only if the fork supports it.
+    video_kwargs: dict[str, Any] = {}
+    if cover and _send_video_supports_cover(client):
+        video_kwargs["cover"] = cover
 
     for attempt in range(3):
         try:
@@ -98,7 +111,7 @@ async def upload_file(
                 return await client.send_video(
                     chat_id, str(path), duration=duration,
                     width=v.width if v else 0, height=v.height if v else 0,
-                    supports_streaming=True, **kwargs,
+                    supports_streaming=True, **kwargs, **video_kwargs,
                 )
             return await client.send_document(
                 chat_id, str(path), force_document=True, **kwargs
