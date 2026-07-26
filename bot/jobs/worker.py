@@ -338,6 +338,36 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
     await _maybe_delete_seedr_folder(rt, job.id)
 
 
+async def _seedr_file_url(sc, file_id: int, folder_id, expected_name: str,
+                          *, prefer_video: bool) -> str:
+    """Get a Seedr download URL, re-resolving the file id from its folder if
+    the stored id has gone stale (fetch_file 404 — common when a busy free
+    account churns files between listing and download)."""
+    try:
+        return await sc.fetch_file_url(file_id)
+    except SeedrError as exc:
+        if not folder_id:
+            raise
+        from bot.utils.matching import VIDEO_EXTS, normalize_name
+        try:
+            files = await sc.walk_folder(int(folder_id))
+        except SeedrError:
+            files = []
+        want = normalize_name(expected_name)
+        match = next((f for f in files if normalize_name(f.name) == want), None)
+        if match is None and prefer_video:
+            vids = [f for f in files
+                    if Path(f.name).suffix.lower() in VIDEO_EXTS]
+            match = max(vids, key=lambda f: f.size) if vids else None
+        if match is None:
+            raise SeedrError(
+                "This file is no longer available on Seedr (it may have been "
+                "evicted while other transfers ran). Please re-send the magnet."
+            ) from exc
+        log.info("Re-resolved stale Seedr file id %s -> %s", file_id, match.id)
+        return await sc.fetch_file_url(match.id)
+
+
 _SOURCE_LABELS = {
     InputType.TG_VIDEO: "Telegram 📲",
     InputType.TG_DOCUMENT: "Telegram 📲",
@@ -391,9 +421,11 @@ async def _acquire_input(rt: Runtime, job: Job, work: Path,
         )
 
     if job.input_type == InputType.SEEDR_FILE:
+        folder_id = job.seedr.get("folder_id")
         async with SeedrClient(cfg.seedr_username, cfg.seedr_password,
                                proxy=cfg.seedr_proxy) as sc:
-            url = await sc.fetch_file_url(int(job.input_ref))
+            url = await _seedr_file_url(sc, int(job.input_ref), folder_id,
+                                        job.input_name, prefer_video=True)
             path = await download_url(
                 url, dest, max_bytes=cfg.max_input_size,
                 progress_cb=_dl_progress, cancel_token=token,
@@ -402,7 +434,8 @@ async def _acquire_input(rt: Runtime, job: Job, work: Path,
             if sub_id:
                 sub_name = str(job.seedr.get("sub_name") or "sub.ass")
                 sub_suffix = Path(sub_name).suffix.lower() or ".ass"
-                sub_url = await sc.fetch_file_url(int(sub_id))
+                sub_url = await _seedr_file_url(sc, int(sub_id), folder_id,
+                                                sub_name, prefer_video=False)
                 await download_url(
                     sub_url, work / "subtitles" / f"raw_sub{sub_suffix}",
                     max_bytes=64 * 1024**2, cancel_token=token,
