@@ -392,6 +392,7 @@ async def spawn_seedr_children(rt: Runtime, parent: Job) -> tuple[int, str]:
                 "subtitle_source": sub_source,
             },
             seedr={
+                "account": s.get("account", ""),
                 "folder_id": s.get("folder_id"),
                 "sub_id": m.get("sub_id"),
                 "sub_name": (m.get("subtitle") or "").rsplit("/", 1)[-1],

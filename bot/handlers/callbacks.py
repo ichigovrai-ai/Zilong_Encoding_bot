@@ -41,6 +41,9 @@ async def on_callback(_: Client, cb: CallbackQuery) -> None:
     if data.verb == "st":
         await _handle_setting(rt, cb, data.arg)
         return
+    if data.verb == "sd":
+        await _handle_seedr(rt, cb, data.arg)
+        return
 
     job = await rt.repo.get(data.job_id)
     if job is None:
@@ -193,6 +196,83 @@ async def _handle_convertsub(rt: Runtime, cb: CallbackQuery, job: Job,
     finally:
         from bot.services.cleanup import cleanup_job_dir
         await cleanup_job_dir(rt.repo, rt.config.work_dir, job.id)
+
+
+async def _handle_seedr(rt: Runtime, cb: CallbackQuery, arg: str) -> None:
+    """Seedr management: refresh, clean one account, or clean all (owner only)."""
+    from bot.handlers.seedr_cmd import render_seedr
+    from bot.services.seedr import SeedrError, clean_account
+    uid = cb.from_user.id if cb.from_user else 0
+    if uid != rt.config.owner_id:
+        await cb.answer("Owner only.", show_alert=True)
+        return
+    accounts = rt.config.seedr_accounts
+
+    async def _refresh(note: str = "") -> None:
+        text, kb = await render_seedr(rt)
+        if note:
+            text = note + "\n\n" + text
+        try:
+            await cb.message.edit_text(text, reply_markup=kb,
+                                       parse_mode=enums.ParseMode.HTML,
+                                       disable_web_page_preview=True)
+        except Exception as exc:  # noqa: BLE001
+            if "MESSAGE_NOT_MODIFIED" not in str(exc):
+                log.warning("Seedr refresh edit failed: %s", exc)
+
+    if arg == "r":
+        await cb.answer("Refreshing…")
+        await _refresh()
+        return
+
+    # Ask for confirmation before destructive cleans.
+    if arg.startswith("c:") and ":" not in arg[2:]:
+        idx = arg[2:]
+        if idx.isdigit() and int(idx) < len(accounts):
+            await cb.answer()
+            await cb.message.edit_reply_markup(
+                keyboards.seedr_confirm_menu(
+                    f"cd:{idx}", f"clean account {keyboards.num_emoji(int(idx))}"))
+        return
+    if arg == "call":
+        await cb.answer()
+        await cb.message.edit_reply_markup(
+            keyboards.seedr_confirm_menu("cdall", "clean ALL accounts"))
+        return
+
+    # Confirmed cleans.
+    if arg.startswith("cd:"):
+        idx = arg[3:]
+        if not (idx.isdigit() and int(idx) < len(accounts)):
+            await cb.answer()
+            return
+        user, pwd = accounts[int(idx)]
+        await cb.answer("Cleaning…")
+        try:
+            f, t = await clean_account(user, pwd, rt.config.seedr_proxy)
+            note = f"🧹 Cleaned {keyboards.num_emoji(int(idx))}: {f} folder(s)" \
+                   + (f", {t} transfer(s)" if t else "") + " removed."
+        except SeedrError as exc:
+            note = f"⚠️ Clean failed: {exc}"
+        await _refresh(note)
+        return
+    if arg == "cdall":
+        await cb.answer("Cleaning all…")
+        tot_f = tot_t = 0
+        errs = 0
+        for user, pwd in accounts:
+            try:
+                f, t = await clean_account(user, pwd, rt.config.seedr_proxy)
+                tot_f += f
+                tot_t += t
+            except SeedrError:
+                errs += 1
+        note = f"🗑 Cleaned all accounts: {tot_f} folder(s)" \
+               + (f", {tot_t} transfer(s)" if tot_t else "") + " removed." \
+               + (f" ({errs} account(s) failed)" if errs else "")
+        await _refresh(note)
+        return
+    await cb.answer()
 
 
 async def _handle_setting(rt: Runtime, cb: CallbackQuery, arg: str) -> None:

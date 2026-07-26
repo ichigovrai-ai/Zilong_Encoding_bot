@@ -422,7 +422,8 @@ async def _acquire_input(rt: Runtime, job: Job, work: Path,
 
     if job.input_type == InputType.SEEDR_FILE:
         folder_id = job.seedr.get("folder_id")
-        async with SeedrClient(cfg.seedr_username, cfg.seedr_password,
+        acct_user, acct_pwd = cfg.seedr_credentials(job.seedr.get("account", ""))
+        async with SeedrClient(acct_user, acct_pwd,
                                proxy=cfg.seedr_proxy) as sc:
             url = await _seedr_file_url(sc, int(job.input_ref), folder_id,
                                         job.input_name, prefer_video=True)
@@ -660,7 +661,15 @@ async def _run_seedr_parent(rt: Runtime, job: Job, token: CancelToken,
         reply_markup=keyboards.cancel_only(job.id), force=True,
     )
 
-    async with SeedrClient(cfg.seedr_username, cfg.seedr_password,
+    # Pick the account with the most free space, and remember it on the job so
+    # every child fetches/deletes from the same account.
+    from bot.services.seedr import pick_best_account
+    acct_user, acct_pwd, _free = await pick_best_account(
+        cfg.seedr_accounts, proxy=cfg.seedr_proxy)
+    job.seedr["account"] = acct_user
+    await rt.repo.update_fields(job.id, seedr=job.seedr)
+
+    async with SeedrClient(acct_user, acct_pwd,
                                proxy=cfg.seedr_proxy) as sc:
         known = {f.id for f in (await sc.list_folder(0)).folders}
         torrent_id = await sc.add_magnet(job.input_ref)
@@ -721,6 +730,7 @@ async def _run_seedr_parent(rt: Runtime, job: Job, token: CancelToken,
         match_dicts.append(entry)
 
     job.seedr = {
+        "account": acct_user,
         "folder_id": folder.id, "folder_name": folder.name,
         "torrent_id": torrent_id,
         "subs": [{"path": s.path, "id": s.id} for s in subs],
@@ -762,8 +772,9 @@ async def _maybe_delete_seedr_folder(rt: Runtime, job_id: str) -> None:
         (*terminal, folder_id),
     )
     if row and row["n"] == 0:
+        acct_user, acct_pwd = cfg.seedr_credentials(job.seedr.get("account", ""))
         try:
-            async with SeedrClient(cfg.seedr_username, cfg.seedr_password,
+            async with SeedrClient(acct_user, acct_pwd,
                                proxy=cfg.seedr_proxy) as sc:
                 await sc.delete_folder(folder_id)
             log.info("Deleted Seedr folder %d after job %s", folder_id, job_id)

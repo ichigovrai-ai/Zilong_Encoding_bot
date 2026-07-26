@@ -13,6 +13,7 @@ from bot.ui.callbacks import VALID_VERBS
 INLINE_VERBS = frozenset({
     "n",    # decorative no-op
     "st",   # settings toggle
+    "sd",   # seedr management
     "x",    # cancel
     "rt",   # retry
     "mi",   # mediainfo card/full toggle

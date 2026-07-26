@@ -76,9 +76,10 @@ class Config:
     # the default-disposition track, else the first text subtitle.
     preferred_sub_lang: str = ""
 
-    # Seedr
-    seedr_username: str = ""
-    seedr_password: str = ""
+    # Seedr — one or more accounts (comma-separated username/password lists,
+    # matched by position). The bot picks whichever account has the most free
+    # space when adding a magnet, and remembers which account each job used.
+    seedr_accounts: tuple[tuple[str, str], ...] = ()
     # HTTP proxy for Seedr API calls. Needed on datacenter IPs (EC2, Colab,
     # Render …) because Seedr blocks add_torrent from those ranges while
     # read-only calls still work. CDN downloads never use the proxy.
@@ -95,7 +96,23 @@ class Config:
 
     @property
     def seedr_enabled(self) -> bool:
-        return bool(self.seedr_username and self.seedr_password)
+        return bool(self.seedr_accounts)
+
+    @property
+    def seedr_username(self) -> str:
+        """First account's username (backward-compat / display)."""
+        return self.seedr_accounts[0][0] if self.seedr_accounts else ""
+
+    @property
+    def seedr_password(self) -> str:
+        return self.seedr_accounts[0][1] if self.seedr_accounts else ""
+
+    def seedr_credentials(self, username: str) -> tuple[str, str]:
+        """Return (user, pass) for a stored username, else the first account."""
+        for u, p in self.seedr_accounts:
+            if u == username:
+                return u, p
+        return (self.seedr_accounts[0] if self.seedr_accounts else ("", ""))
 
     def is_authorized(self, user_id: int) -> bool:
         if user_id == self.owner_id:
@@ -150,10 +167,21 @@ class Config:
         elif owner_raw:
             owner_id = int(owner_raw)
 
-        seedr_user = opt("SEEDR_USERNAME")
-        seedr_pwd = opt("SEEDR_PASSWORD")
-        if bool(seedr_user) != bool(seedr_pwd):
+        # One or more accounts: comma-separated usernames and passwords,
+        # matched by position. A single account (no commas) still works.
+        seedr_users = [u.strip() for u in opt("SEEDR_USERNAME").split(",")
+                       if u.strip()]
+        seedr_pwds = [p.strip() for p in opt("SEEDR_PASSWORD").split(",")]
+        seedr_pwds = [p for p in seedr_pwds if p] if seedr_users else []
+        if bool(seedr_users) != bool(seedr_pwds):
             errors.append("SEEDR_USERNAME and SEEDR_PASSWORD must be set together")
+        elif len(seedr_users) != len(seedr_pwds):
+            errors.append(
+                f"SEEDR_USERNAME has {len(seedr_users)} account(s) but "
+                f"SEEDR_PASSWORD has {len(seedr_pwds)} — comma-separated counts "
+                f"must match"
+            )
+        seedr_accounts = tuple(zip(seedr_users, seedr_pwds))
         seedr_proxy = opt("SEEDR_PROXY")
         if seedr_proxy and not seedr_proxy.startswith(("http://", "https://")):
             errors.append("SEEDR_PROXY must be an http(s):// proxy URL "
@@ -170,8 +198,8 @@ class Config:
                 "Configuration invalid:\n  - " + "\n  - ".join(errors)
             )
 
-        secrets = tuple(s for s in (bot_token, api_hash, seedr_pwd,
-                                    seedr_proxy) if s)
+        secrets = tuple(s for s in (bot_token, api_hash, seedr_proxy,
+                                    *seedr_pwds) if s)
 
         cfg = cls(
             api_id=api_id,
@@ -206,8 +234,7 @@ class Config:
             default_resolution=opt("DEFAULT_RESOLUTION", "original"),
             fallback_font=opt("FALLBACK_FONT", "Arial"),
             preferred_sub_lang=opt("PREFERRED_SUB_LANG", ""),
-            seedr_username=seedr_user,
-            seedr_password=seedr_pwd,
+            seedr_accounts=seedr_accounts,
             seedr_proxy=seedr_proxy,
             seedr_auto_delete=opt("SEEDR_AUTO_DELETE", "1").lower() in ("1", "true", "yes"),
             seedr_poll_interval=num("SEEDR_POLL_INTERVAL", 10.0, 3.0, 120.0),

@@ -99,13 +99,17 @@ async def run() -> None:
 
     if cfg.seedr_enabled:
         from bot.services.seedr import SeedrClient
-        try:
-            async with SeedrClient(cfg.seedr_username, cfg.seedr_password,
-                                   proxy=cfg.seedr_proxy) as sc:
-                ok = await sc.check_credentials()
-            log.info("Seedr credentials: %s", "OK" if ok else "INVALID")
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Seedr check failed: %s", exc)
+        ok_count = 0
+        for user, pwd in cfg.seedr_accounts:
+            try:
+                async with SeedrClient(user, pwd, proxy=cfg.seedr_proxy) as sc:
+                    if await sc.check_credentials():
+                        ok_count += 1
+                    else:
+                        log.warning("Seedr account %s: INVALID", user[:20])
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Seedr account %s check failed: %s", user[:20], exc)
+        log.info("Seedr accounts OK: %d/%d", ok_count, len(cfg.seedr_accounts))
 
     await manager.start()
     log.info("Job manager started (encodes=%d, downloads=%d)",

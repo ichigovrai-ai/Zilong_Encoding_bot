@@ -88,6 +88,53 @@ def _name_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
 
 
+async def pick_best_account(
+    accounts: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+    proxy: str = "",
+) -> tuple[str, str, int]:
+    """Return (username, password, free_bytes) for the account with the most
+    free space. Accounts that fail to authenticate or read are skipped; if
+    none work the last error is raised."""
+    best: tuple[int, str, str] | None = None
+    last_err: Exception | None = None
+    for user, pwd in accounts:
+        try:
+            async with SeedrClient(user, pwd, proxy=proxy) as sc:
+                total, used = await sc.storage()
+            # Unknown storage → treat as plenty so the account is still usable.
+            free = max(0, total - used) if total else 10 ** 12
+            if best is None or free > best[0]:
+                best = (free, user, pwd)
+        except SeedrError as exc:
+            log.warning("[Seedr] Account %s unavailable: %s", user[:20], exc)
+            last_err = exc
+    if best is None:
+        raise last_err or SeedrError("No usable Seedr account.")
+    return best[1], best[2], best[0]
+
+
+async def clean_account(user: str, pwd: str, proxy: str = "") -> tuple[int, int]:
+    """Delete every folder and clear stuck transfers on one account.
+    Returns (folders_deleted, torrents_removed)."""
+    folders = torrents = 0
+    async with SeedrClient(user, pwd, proxy=proxy) as sc:
+        listing = await sc.list_folder(0)
+        for f in listing.folders:
+            try:
+                await sc.delete_folder(f.id)
+                folders += 1
+            except SeedrError as exc:
+                log.warning("[Seedr] clean: folder %s: %s", f.id, exc)
+        for t in listing.torrents:
+            if t.id is not None:
+                try:
+                    await sc.delete_torrent(t.id)
+                    torrents += 1
+                except SeedrError:
+                    pass
+    return folders, torrents
+
+
 def _split_proxy(proxy: str) -> tuple[str | None, "aiohttp.BasicAuth | None"]:
     """Split a proxy URL into (url_without_userinfo, BasicAuth|None).
 

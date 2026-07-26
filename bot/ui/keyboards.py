@@ -206,6 +206,40 @@ def settings_menu(settings: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+_NUM_EMOJI = ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣")
+
+
+def num_emoji(i: int) -> str:
+    return _NUM_EMOJI[i] if 0 <= i < len(_NUM_EMOJI) else f"#{i + 1}"
+
+
+def seedr_menu(accounts: list[tuple[int, int]]) -> InlineKeyboardMarkup:
+    """Seedr management panel. `accounts` = [(index, n_folders), …]. Buttons
+    carry no job id; the arg encodes the action."""
+    rows: list[list[InlineKeyboardButton]] = []
+    clean = [
+        InlineKeyboardButton(f"🧹 Clean {num_emoji(i)}",
+                             callback_data=pack("sd", "", f"c:{i}"))
+        for i, nf in accounts if nf
+    ]
+    for j in range(0, len(clean), 2):
+        rows.append(clean[j:j + 2])
+    if sum(nf for _, nf in accounts) > 0:
+        rows.append([InlineKeyboardButton(
+            "🗑 Clean ALL", callback_data=pack("sd", "", "call"))])
+    rows.append([InlineKeyboardButton("🔄 Refresh",
+                                      callback_data=pack("sd", "", "r"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def seedr_confirm_menu(arg: str, label: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"✅ Yes, {label}",
+                              callback_data=pack("sd", "", arg))],
+        [InlineKeyboardButton("↩️ Back", callback_data=pack("sd", "", "r"))],
+    ])
+
+
 def extract_menu(job_id: str, n_subs: int, n_audio: int) -> InlineKeyboardMarkup:
     rows = []
     if n_subs:

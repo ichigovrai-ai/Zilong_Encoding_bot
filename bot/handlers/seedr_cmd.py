@@ -1,4 +1,8 @@
-"""/seedr — account info, storage, transfers and folders."""
+"""/seedr — multi-account status and management (owner only).
+
+Shows every configured Seedr account with its storage and folders, and lets
+the owner clean folders / clear stuck transfers per account or across all.
+"""
 from __future__ import annotations
 
 import logging
@@ -6,53 +10,66 @@ import logging
 from pyrogram import Client, enums, filters
 from pyrogram.types import Message
 
-from bot.runtime import get_runtime
+from bot.runtime import Runtime, get_runtime
 from bot.services.seedr import SeedrClient, SeedrError
+from bot.ui import keyboards
+from bot.ui.panels import SEP
 from bot.utils.timefmt import human_size
 
 log = logging.getLogger(__name__)
+HTML = enums.ParseMode.HTML
+
+
+def _mask(email: str) -> str:
+    """Show enough of an email to identify the account without dumping it all."""
+    name, _, domain = email.partition("@")
+    head = name[:4] + "…" if len(name) > 5 else name
+    return f"{head}@{domain}" if domain else head
+
+
+async def render_seedr(rt: Runtime) -> tuple[str, object]:
+    """Build the /seedr panel text + keyboard (shared by command and refresh)."""
+    accounts = rt.config.seedr_accounts
+    lines = [f"🌱 <b>SEEDR — {len(accounts)} account(s)</b>", SEP]
+    account_infos: list[tuple[int, int]] = []
+    for i, (user, pwd) in enumerate(accounts):
+        emoji = keyboards.num_emoji(i)
+        try:
+            async with SeedrClient(user, pwd, proxy=rt.config.seedr_proxy) as sc:
+                total, used = await sc.storage()
+                listing = await sc.list_folder(0)
+            n_fold, n_tor = len(listing.folders), len(listing.torrents)
+            account_infos.append((i, n_fold))
+            pct = (used / total * 100) if total else 0
+            free = human_size(max(0, total - used)) if total else "?"
+            lines.append(f"{emoji} <code>{_mask(user)}</code>")
+            lines.append(
+                f"    💾 {human_size(used)} / {human_size(total)} "
+                f"({pct:.0f}%, {free} free)"
+            )
+            bits = [f"📁 {n_fold} folder(s)"]
+            if n_tor:
+                bits.append(f"⏬ {n_tor} transfer(s)")
+            lines.append("    " + " · ".join(bits))
+        except SeedrError as exc:
+            account_infos.append((i, 0))
+            lines.append(f"{emoji} <code>{_mask(user)}</code> — ⚠️ {exc}")
+    lines += ["", "🧲 Send a magnet to auto-pick the emptiest account."]
+    return "\n".join(lines), keyboards.seedr_menu(account_infos)
 
 
 @Client.on_message(filters.command("seedr") & filters.private)
 async def cmd_seedr(_: Client, message: Message) -> None:
     rt = get_runtime()
-    if not rt.config.is_authorized(message.from_user.id):
+    if not message.from_user or message.from_user.id != rt.config.owner_id:
         return
     if not rt.config.seedr_enabled:
         await message.reply_text(
-            "⚠️ Seedr is not configured. Set SEEDR_USERNAME and "
-            "SEEDR_PASSWORD in the environment."
+            "⚠️ Seedr is not configured. Set SEEDR_USERNAME / SEEDR_PASSWORD "
+            "(comma-separate several accounts)."
         )
         return
-    status = await message.reply_text("🌱 Checking Seedr…")
-    try:
-        async with SeedrClient(rt.config.seedr_username,
-                               rt.config.seedr_password,
-                               proxy=rt.config.seedr_proxy) as sc:
-            total, used = await sc.storage()
-            listing = await sc.list_folder(0)
-    except SeedrError as exc:
-        await status.edit_text(f"⚠️ Seedr error: {exc}")
-        return
-
-    from bot.ui.panels import SEP, bar
-    lines = ["🌱 <b>SEEDR ACCOUNT</b>", SEP]
-    if total:
-        pct = used / total * 100
-        lines += [
-            f"💾 {human_size(used)} / {human_size(total)}",
-            f"<code>{bar(pct)}</code>  <b>{pct:.0f}%</b>",
-        ]
-    if listing.torrents:
-        lines += ["", "⏬ <b>ACTIVE TRANSFERS</b>", SEP]
-        for t in listing.torrents[:10]:
-            lines.append(f"🧲 {t.name[:40]}")
-            lines.append(f"<code>{bar(t.progress)}</code>  {t.progress:.0f}%")
-    if listing.folders:
-        lines += ["", "📁 <b>FOLDERS</b>", SEP]
-        for f in listing.folders[:10]:
-            lines.append(f"📂 {f.name[:40]} · {human_size(f.size)}")
-    if not listing.torrents and not listing.folders:
-        lines.append("<i>😴 No transfers or folders.</i>")
-    lines += ["", "🧲 Send a magnet link to start a hardsub job."]
-    await status.edit_text("\n".join(lines), parse_mode=enums.ParseMode.HTML)
+    status = await message.reply_text("🌱 Checking Seedr accounts…")
+    text, kb = await render_seedr(rt)
+    await status.edit_text(text, reply_markup=kb, parse_mode=HTML,
+                           disable_web_page_preview=True)
