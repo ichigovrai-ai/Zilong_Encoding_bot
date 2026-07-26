@@ -215,18 +215,17 @@ def num_emoji(i: int) -> str:
 
 def seedr_menu(accounts: list[tuple[int, int]]) -> InlineKeyboardMarkup:
     """Seedr management panel. `accounts` = [(index, n_folders), …]. Buttons
-    carry no job id; the arg encodes the action. Clean buttons always show so
-    the management is discoverable even when an account is empty."""
+    carry no job id; the arg encodes the action. A Clean button only appears
+    for an account that actually has folders to clear."""
     rows: list[list[InlineKeyboardButton]] = []
     clean = [
-        InlineKeyboardButton(
-            f"🧹 Clean {num_emoji(i)}" + (f" ({nf})" if nf else ""),
-            callback_data=pack("sd", "", f"c:{i}"))
-        for i, nf in accounts
+        InlineKeyboardButton(f"🧹 Clean {num_emoji(i)} ({nf})",
+                             callback_data=pack("sd", "", f"c:{i}"))
+        for i, nf in accounts if nf
     ]
     for j in range(0, len(clean), 2):
         rows.append(clean[j:j + 2])
-    if len(accounts) > 1:
+    if len(clean) > 1:
         rows.append([InlineKeyboardButton(
             "🗑 Clean ALL", callback_data=pack("sd", "", "call"))])
     rows.append([InlineKeyboardButton("🔄 Refresh",
