@@ -217,7 +217,8 @@ async def intake_url(rt: Runtime, message: Any, url: str) -> None:
                   "Choose an action:"))
     sent = await message.reply_text(
         text,
-        reply_markup=keyboards.action_menu(job.id, bool(media and media.subtitles)),
+        reply_markup=keyboards.action_menu(
+            job.id, bool(media and media.subtitles), fc=rt.config.fc_enabled),
         parse_mode=enums.ParseMode.HTML, quote=True,
         disable_web_page_preview=True,
     )
