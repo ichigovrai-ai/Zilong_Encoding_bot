@@ -23,6 +23,7 @@ class ExtractionError(RuntimeError):
 async def extract_text_subtitle(
     input_path: str, stream: SubtitleStream, out_dir: str | Path, *,
     ffmpeg: str = "ffmpeg", cancel_token: CancelToken | None = None,
+    timeout: float = 300,
 ) -> str:
     """Extract an embedded TEXT subtitle stream to .ass (preserves styling for
     ASS sources; SRT/VTT convert losslessly enough for burn-in)."""
@@ -37,11 +38,14 @@ async def extract_text_subtitle(
     # style synthesis.
     ext = "ass" if stream.codec in ("ass", "ssa") else "srt"
     out = out_dir / f"embedded_{stream.type_index}.{ext}"
-    args = [
-        ffmpeg, "-hide_banner", "-y", "-i", input_path,
-        "-map", f"0:s:{stream.type_index}", "-c:s", ext, str(out),
-    ]
-    code, _, err = await run_process(args, timeout=300, cancel_token=cancel_token)
+    args = [ffmpeg, "-hide_banner", "-y"]
+    if "://" in input_path:
+        # Remote input (e.g. a signed Seedr URL): CDNs often reject ffmpeg's
+        # default user agent. Pass a longer `timeout` for big remote files.
+        args += ["-user_agent", "Mozilla/5.0"]
+    args += ["-i", input_path,
+             "-map", f"0:s:{stream.type_index}", "-c:s", ext, str(out)]
+    code, _, err = await run_process(args, timeout=timeout, cancel_token=cancel_token)
     if code != 0 or not out.exists() or out.stat().st_size == 0:
         raise ExtractionError(
             f"Could not extract subtitle stream: {tail_text(err, 300)}"
@@ -101,6 +105,74 @@ async def convert_subtitle_format(
             f"{tail_text(err, 300)}"
         )
     return str(out)
+
+
+# ISO 639 language tag → (short code used in file names, display name, flag).
+_LANGS: dict[str, tuple[str, str, str]] = {
+    "eng": ("En", "English", "🇬🇧"), "fre": ("Fr", "French", "🇫🇷"),
+    "ger": ("De", "German", "🇩🇪"), "ita": ("It", "Italian", "🇮🇹"),
+    "spa": ("Es", "Spanish", "🇪🇸"), "por": ("Pt", "Portuguese", "🇵🇹"),
+    "ara": ("Ar", "Arabic", "🇸🇦"), "rus": ("Ru", "Russian", "🇷🇺"),
+    "jpn": ("Ja", "Japanese", "🇯🇵"), "chi": ("Zh", "Chinese", "🇨🇳"),
+    "kor": ("Ko", "Korean", "🇰🇷"), "tur": ("Tr", "Turkish", "🇹🇷"),
+    "pol": ("Pl", "Polish", "🇵🇱"), "dut": ("Nl", "Dutch", "🇳🇱"),
+    "swe": ("Sv", "Swedish", "🇸🇪"), "nor": ("No", "Norwegian", "🇳🇴"),
+    "dan": ("Da", "Danish", "🇩🇰"), "fin": ("Fi", "Finnish", "🇫🇮"),
+    "cze": ("Cs", "Czech", "🇨🇿"), "gre": ("El", "Greek", "🇬🇷"),
+    "heb": ("He", "Hebrew", "🇮🇱"), "hin": ("Hi", "Hindi", "🇮🇳"),
+    "tha": ("Th", "Thai", "🇹🇭"), "vie": ("Vi", "Vietnamese", "🇻🇳"),
+    "ind": ("Id", "Indonesian", "🇮🇩"), "may": ("Ms", "Malay", "🇲🇾"),
+    "ukr": ("Uk", "Ukrainian", "🇺🇦"), "rum": ("Ro", "Romanian", "🇷🇴"),
+    "hun": ("Hu", "Hungarian", "🇭🇺"), "bul": ("Bg", "Bulgarian", "🇧🇬"),
+}
+_LANG_ALIASES = {
+    "fra": "fre", "deu": "ger", "zho": "chi", "nld": "dut", "ces": "cze",
+    "ell": "gre", "ron": "rum", "msa": "may", "nob": "nor",
+    "en": "eng", "fr": "fre", "de": "ger", "it": "ita", "es": "spa",
+    "pt": "por", "ar": "ara", "ru": "rus", "ja": "jpn", "zh": "chi",
+    "ko": "kor", "tr": "tur", "pl": "pol", "nl": "dut", "sv": "swe",
+    "no": "nor", "da": "dan", "fi": "fin", "cs": "cze", "el": "gre",
+    "he": "heb", "hi": "hin", "th": "tha", "vi": "vie", "id": "ind",
+    "ms": "may", "uk": "ukr", "ro": "rum", "hu": "hun", "bg": "bul",
+}
+
+
+def subtitle_display(language: str, title: str = "") -> tuple[str, str, str]:
+    """(short code, language name, flag) for a subtitle stream.
+
+    ``("Fr", "French", "🇫🇷")`` for ``"fre"``. Unknown/undetermined tracks get
+    a neutral 🌐 flag instead of a wrong guess.
+    """
+    key = (language or "").strip().lower()
+    key = _LANG_ALIASES.get(key, key)
+    if key in _LANGS:
+        code, name, flag = _LANGS[key]
+        if key == "por" and "br" in (title or "").lower():
+            flag = "🇧🇷"   # Brazilian Portuguese, as labelled by the release
+        return code, name, flag
+    if key in ("", "und", "unk", "zxx", "mis", "mul"):
+        return "Und", "Unknown language", "🌐"
+    return key[:3].capitalize(), key.upper(), "🌐"
+
+
+def select_subtitle_streams(streams: list[SubtitleStream],
+                            wanted: object = None) -> list[SubtitleStream]:
+    """Text subtitle streams to extract.
+
+    ``wanted`` is the user's pick stored in ``job.options["extract_streams"]``:
+    ``None``/``"all"``/empty → every text stream; a list of ``type_index``
+    values → only those. Bitmap streams (PGS/VobSub) are always skipped.
+    """
+    text = [s for s in streams if not s.is_bitmap]
+    if not isinstance(wanted, (list, tuple, set)) or not wanted:
+        return text
+    chosen: set[int] = set()
+    for w in wanted:
+        try:
+            chosen.add(int(w))
+        except (TypeError, ValueError):
+            continue
+    return [s for s in text if s.type_index in chosen]
 
 
 def describe_subtitle_streams(media: MediaInfo) -> list[str]:
