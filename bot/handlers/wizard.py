@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 # Verbs handled by handle_selection(). The callback router dispatches exactly
 # these here — keep the two in sync via this single source of truth.
-WIZARD_VERBS = frozenset({"r", "c", "q", "s", "ss", "u", "au", "bk"})
+WIZARD_VERBS = frozenset({"r", "c", "q", "s", "ss", "u", "au", "bk", "fq", "fy"})
 
 STEPS: dict[str, list[str]] = {
     JobKind.ENCODE: ["res", "codec", "qual", "subsrc", "confirm"],
@@ -32,7 +32,13 @@ STEPS: dict[str, list[str]] = {
     JobKind.HARDSUB: ["subsrc", "res", "codec", "qual", "confirm"],
     # Seedr parent continues into this after episode selection:
     JobKind.SEEDR_HARDSUB: ["res", "codec", "qual", "confirm"],
+    # FreeConvert, direct link: quality → style → user sends the subtitle,
+    # which starts the job (no confirm step).
+    JobKind.FC_HARDSUB: ["fcq", "fcy", "fcsub"],
 }
+# FreeConvert on Seedr episodes: quality → style → episodes spawn. The
+# subtitle is extracted automatically, so nothing is asked after the style.
+FC_MAGNET_STEPS = ["fcq", "fcy"]
 
 _RES_ARGS = {"360", "480", "720", "1080", "1440", "2160"}
 
@@ -59,12 +65,27 @@ async def enter_kind(rt: Runtime, job: Job, kind: str) -> tuple[str, Any]:
     job.options["history"] = []
     if kind == JobKind.HARDSUB:
         job.options["subtitle_mode"] = "hard"
+    if kind == JobKind.FC_HARDSUB:
+        job.options["subtitle_mode"] = "hard"
+        job.options["engine"] = "fc"
     await rt.repo.update_fields(job.id, kind=kind, options=job.options)
     return render(job)
 
 
+async def enter_fc_magnet(rt: Runtime, job: Job) -> tuple[str, Any]:
+    """FC hardsub chosen on the Seedr episode picker (job stays a Seedr
+    parent; the FC options are applied to every child it spawns)."""
+    job.options["fc_mag"] = True
+    job.options["step"] = FC_MAGNET_STEPS[0]
+    job.options["main_step"] = FC_MAGNET_STEPS[0]
+    job.options["history"] = []
+    await _save(rt, job)
+    return render(job)
+
+
 def _next_step(job: Job) -> str:
-    steps = STEPS.get(job.kind, STEPS[JobKind.ENCODE])
+    steps = (FC_MAGNET_STEPS if job.options.get("fc_mag")
+             else STEPS.get(job.kind, STEPS[JobKind.ENCODE]))
     cur = job.options.get("step", steps[0])
     # sub-steps not present in the main list
     if cur in ("substream", "subdisp", "upscale"):
@@ -121,6 +142,16 @@ def render(job: Job) -> tuple[str, Any]:
     if step == "subdisp":
         return header + "Burn the subtitle in, or mux it as a separate track?", \
             keyboards.subtitle_disposition_menu(jid)
+    if step == "fcq":
+        return header + "☁️ FreeConvert — choose the output quality:", \
+            keyboards.fc_quality_menu(jid)
+    if step == "fcy":
+        return header + "Choose the subtitle style:", \
+            keyboards.fc_style_menu(jid)
+    if step == "fcsub":
+        return header + ("Send the subtitle file now (.ass, .ssa, .srt, "
+                         ".vtt). Encoding starts as soon as it arrives."), \
+            keyboards.fc_subtitle_menu(jid)
     if step == "confirm":
         return header + "Ready to start?", keyboards.confirm_menu(jid)
     return header + "Choose an option:", keyboards.confirm_menu(jid)
@@ -246,9 +277,38 @@ async def handle_selection(
             else:
                 o["step"] = "subdisp"
 
-    elif verb == "bk":
-        go_back(job)
+    elif verb == "fq":
+        if arg in {a for a, _ in keyboards.FC_QUALITIES}:
+            o["fc_res"] = int(arg)
+            advance(job)
+        else:
+            alert = "Unknown quality."
 
+    elif verb == "fy":
+        from bot.services.house_style import NO_CHANGE_KEY, STYLE_PRESETS
+        if arg != NO_CHANGE_KEY and arg not in STYLE_PRESETS:
+            alert = "Unknown style."
+        else:
+            o["fc_style"] = arg
+            if o.get("fc_mag"):
+                n, summary = await spawn_seedr_children(rt, job, fc=True)
+                await rt.repo.transition(job.id, JobStatus.COMPLETED,
+                                         detail=f"spawned {n} FC episode job(s)")
+                from bot.ui.panels import SEP
+                return (f"🚀 <b>Queued {n} episode(s)</b>\n{SEP}\n{summary}\n\n"
+                        f"<i>Track with /queue.</i>"), None, None
+            advance(job)
+            o["await"] = "subtitle"
+
+    elif verb == "bk":
+        if o.get("fc_mag") and not o.get("history"):
+            # Back from the first FC step → return to the episode picker.
+            for k in ("fc_mag", "step", "main_step", "fc_res", "fc_style"):
+                o.pop(k, None)
+            await _save(rt, job)
+            text, kb = render_episodes(rt, job)
+            return text, kb, None
+        go_back(job)
     await _save(rt, job)
     if alert:
         text, kb = render(job)
@@ -262,6 +322,13 @@ async def after_subtitle_upload(rt: Runtime, job: Job) -> tuple[str, Any]:
     o = job.options
     o["subtitle_source"] = "upload"
     o.pop("await", None)
+    if job.kind == JobKind.FC_HARDSUB:
+        # Subtitle in hand → straight to the cloud encode, no confirm step.
+        o["subtitle_mode"] = "hard"
+        await _save(rt, job)
+        await rt.manager.enqueue(job.id)
+        return ("🚀 Queued ☁️ FreeConvert. Progress will appear here.",
+                keyboards.cancel_only(job.id))
     if job.kind == JobKind.HARDSUB or job.kind == JobKind.SEEDR_HARDSUB:
         o["subtitle_mode"] = "hard"
         o["step"] = o.get("main_step", "subsrc")
@@ -327,7 +394,8 @@ async def start_confirmed(rt: Runtime, job: Job) -> str:
     return "🚀 Queued. Progress will appear here."
 
 
-async def spawn_seedr_children(rt: Runtime, parent: Job) -> tuple[int, str]:
+async def spawn_seedr_children(rt: Runtime, parent: Job,
+                               fc: bool = False) -> tuple[int, str]:
     """Create one child job per selected episode using the user's /settings.
     Returns (count, human summary of the settings applied)."""
     from bot.services.user_settings import get_user_settings, value_of
@@ -356,6 +424,13 @@ async def spawn_seedr_children(rt: Runtime, parent: Job) -> tuple[int, str]:
         f"🚫 no subs · 🖥 {_res} · 🎯 {value_of(settings, 'def_codec')}"
     )
 
+    if fc:
+        from bot.services.house_style import STYLE_PRESET_LABELS
+        po = parent.options
+        _q = dict(keyboards.FC_QUALITIES).get(str(po.get("fc_res", 0)), "Original quality")
+        _st = STYLE_PRESET_LABELS.get(str(po.get("fc_style", "a")), "Style A")
+        summary = f"☁️ FreeConvert · 🖥 {_q} · 🎨 {_st} · 💬 FR subtitle extracted automatically"
+
     s = parent.seedr
     matches: list[dict] = s.get("matches") or []
     selected: list[int] = s.get("selected") or []
@@ -377,20 +452,32 @@ async def spawn_seedr_children(rt: Runtime, parent: Job) -> tuple[int, str]:
             sub_mode, sub_source = "hard", "seedr"
         else:
             sub_mode, sub_source = "hard", "embedded_auto"
+        if fc:
+            # FreeConvert always burns subtitles: the matched external one,
+            # else the video's own FR track (stream extractor in the worker).
+            sub_mode = "hard"
+            sub_source = "seedr" if has_sub else "embedded_auto"
         child = Job(
             id=new_job_id(),
             user_id=parent.user_id,
             chat_id=parent.chat_id,
-            kind=JobKind.HARDSUB if sub_mode == "hard" else JobKind.ENCODE,
+            kind=(JobKind.FC_HARDSUB if fc else
+                  JobKind.HARDSUB if sub_mode == "hard" else JobKind.ENCODE),
             input_type=InputType.SEEDR_FILE,
             input_ref=str(m["video_id"]),
             input_name=str(m.get("video_label") or "episode.mkv"),
             input_size=int(m.get("video_size") or 0),
-            options={
+            options=({
+                "engine": "fc",
+                "fc_res": int(parent.options.get("fc_res", 0)),
+                "fc_style": str(parent.options.get("fc_style", "a")),
+                "subtitle_mode": sub_mode,
+                "subtitle_source": sub_source,
+            } if fc else {
                 **inherited,
                 "subtitle_mode": sub_mode,
                 "subtitle_source": sub_source,
-            },
+            }),
             seedr={
                 "account": s.get("account", ""),
                 "folder_id": s.get("folder_id"),
@@ -413,6 +500,24 @@ async def spawn_seedr_children(rt: Runtime, parent: Job) -> tuple[int, str]:
         await rt.manager.enqueue(child.id)
         count += 1
     return count, summary
+
+
+def render_episodes(rt: Runtime, job: Job) -> tuple[str, Any]:
+    """The Seedr episode-picker panel (used when backing out of FC steps)."""
+    from bot.ui.panels import episodes_panel
+    from bot.utils.matching import MatchConfidence
+    s = job.seedr
+    matches = s.get("matches") or []
+    selected = s.get("selected") or []
+    text = episodes_panel(
+        folder_name=str(s.get("folder_name") or "torrent"),
+        n_videos=len(matches), n_subs=len(s.get("subs") or []),
+        n_selected=len(selected),
+        n_uncertain=sum(1 for m in matches
+                        if m.get("confidence") == MatchConfidence.UNCERTAIN.value),
+    )
+    return text, keyboards.episodes_menu(job.id, matches, selected,
+                                         fc=rt.config.fc_enabled)
 
 
 async def _save(rt: Runtime, job: Job) -> None:
