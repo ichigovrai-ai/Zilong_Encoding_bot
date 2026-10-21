@@ -78,6 +78,12 @@ async def run_job(job_id: str, token: CancelToken) -> None:
                 _run_seedr_parent(rt, job, token, reporter, style),
                 timeout=timeout,
             )
+        elif job.kind == JobKind.FC_HARDSUB:
+            from bot.jobs.fc_pipeline import run_fc_job
+            await asyncio.wait_for(
+                run_fc_job(rt, job, token, reporter, started, settings, style),
+                timeout=timeout,
+            )
         else:
             await asyncio.wait_for(
                 _run_pipeline(rt, job, token, reporter, started, settings),
@@ -749,7 +755,8 @@ async def _run_seedr_parent(rt: Runtime, job: Job, token: CancelToken,
             n_selected=len(job.seedr["selected"]), n_uncertain=n_uncertain,
         ),
         reply_markup=keyboards.episodes_menu(
-            job.id, match_dicts, job.seedr["selected"]
+            job.id, match_dicts, job.seedr["selected"],
+            fc=rt.config.fc_enabled,
         ),
         force=True,
     )
