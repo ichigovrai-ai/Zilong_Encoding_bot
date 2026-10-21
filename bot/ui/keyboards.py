@@ -20,7 +20,8 @@ def _nav_row(job_id: str, back: bool = True) -> list[InlineKeyboardButton]:
     return row
 
 
-def action_menu(job_id: str, has_subtitle_streams: bool) -> InlineKeyboardMarkup:
+def action_menu(job_id: str, has_subtitle_streams: bool,
+                fc: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [_btn("🎬 Encode", "a", job_id, "encode"),
          _btn("🗜 Compress", "a", job_id, "compress")],
@@ -30,7 +31,39 @@ def action_menu(job_id: str, has_subtitle_streams: bool) -> InlineKeyboardMarkup
          _btn("📋 Media info", "a", job_id, "minfo")],
         [_btn("✖️ Cancel", "x", job_id)],
     ]
+    if fc:
+        rows.insert(2, [_btn("☁️ FC hardsub", "a", job_id, "fchs")])
     return InlineKeyboardMarkup(rows)
+
+
+# ── FreeConvert (cloud hardsub) ─────────────────────────────────────────
+# (callback arg, label) — arg is the target height, "0" = keep the original.
+FC_QUALITIES: tuple[tuple[str, str], ...] = (
+    ("360", "360p · YouTube"),
+    ("480", "480p · YouTube"),
+    ("720", "720p · Facebook"),
+    ("1080", "1080p"),
+    ("0", "Original quality"),
+)
+
+
+def fc_quality_menu(job_id: str) -> InlineKeyboardMarkup:
+    rows = [[_btn(label, "fq", job_id, arg)] for arg, label in FC_QUALITIES]
+    rows.append(_nav_row(job_id))
+    return InlineKeyboardMarkup(rows)
+
+
+def fc_style_menu(job_id: str) -> InlineKeyboardMarkup:
+    from bot.services.house_style import NO_CHANGE_KEY, STYLE_PRESET_LABELS
+    keys = ["a", "b", "c", "d", NO_CHANGE_KEY]
+    buttons = [_btn(STYLE_PRESET_LABELS[k], "fy", job_id, k) for k in keys]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append(_nav_row(job_id))
+    return InlineKeyboardMarkup(rows)
+
+
+def fc_subtitle_menu(job_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([_nav_row(job_id)])
 
 
 def resolution_menu(job_id: str, src_short: int = 0) -> InlineKeyboardMarkup:
@@ -167,7 +200,7 @@ def untimed_txt_menu(job_id: str) -> InlineKeyboardMarkup:
 
 
 def episodes_menu(job_id: str, matches: list[dict[str, Any]],
-                  selected: list[int]) -> InlineKeyboardMarkup:
+                  selected: list[int], fc: bool = False) -> InlineKeyboardMarkup:
     """Multi-episode picker. `matches` mirrors job.seedr['matches']."""
     rows = []
     for i, m in enumerate(matches[:20]):
@@ -180,6 +213,8 @@ def episodes_menu(job_id: str, matches: list[dict[str, Any]],
             rows.append([_btn("   └ pick subtitle…", "fx", job_id, str(i))])
     rows.append([_btn("Select all", "ea", job_id),
                  _btn("🚀 Continue", "go", job_id)])
+    if fc:
+        rows.append([_btn("☁️ FC hardsub", "a", job_id, "fcmag")])
     rows.append([_btn("✖️ Cancel", "x", job_id)])
     return InlineKeyboardMarkup(rows)
 
