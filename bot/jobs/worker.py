@@ -611,23 +611,36 @@ async def _run_extract(rt: Runtime, job: Job, media: MediaInfo,
     target = str(job.options.get("extract_target", "subtitles"))
     sent = 0
     if target == "subtitles":
-        streams = [s for s in media.subtitles if not s.is_bitmap]
-        if not streams:
+        from bot.services.extraction import select_subtitle_streams
+        if not [s for s in media.subtitles if not s.is_bitmap]:
             raise ExtractionError(
                 "No text subtitle streams found (bitmap PGS/VobSub streams "
                 "cannot be converted without OCR)."
             )
+        streams = select_subtitle_streams(
+            media.subtitles, job.options.get("extract_streams"))
+        if not streams:
+            raise ExtractionError(
+                "The selected subtitle stream was not found in this file."
+            )
+        from bot.services.extraction import subtitle_display
+        used: dict[str, int] = {}
         for stream in streams[:10]:
             token.raise_if_cancelled()
             path = await extract_text_subtitle(
                 str(input_path), stream, work / "output",
                 ffmpeg=cfg.ffmpeg_path, cancel_token=token,
             )
-            label = f"{Path(job.input_name).stem}.{stream.language}" \
-                    f".{stream.type_index}{Path(path).suffix}"
+            code, lang_name, flag = subtitle_display(stream.language,
+                                                     stream.title)
+            used[code] = used.get(code, 0) + 1
+            suffix = f"_{used[code]}" if used[code] > 1 else ""
+            label = f"Subtitle_{code}{suffix}{Path(path).suffix}"
+            caption = f"{flag} {lang_name} · {stream.codec}"
+            if stream.title:
+                caption += f" · {stream.title[:40]}"
             await rt.client.send_document(
-                job.chat_id, path, file_name=label,
-                caption=f"💬 {stream.language} · {stream.codec}",
+                job.chat_id, path, file_name=label, caption=caption,
             )
             sent += 1
     else:
