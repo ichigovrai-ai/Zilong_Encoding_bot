@@ -1,4 +1,4 @@
-# Zilong Encoding Bot
+**# Zilong Encoding Bot
 
 A Telegram bot focused on **video encoding, resolution conversion,
 compression, subtitle processing and automated Seedr hardsubbing**.
@@ -221,6 +221,30 @@ Design points:
 5. Only the needed files are downloaded from Seedr; after the last episode
    finishes the Seedr folder is deleted (if `SEEDR_AUTO_DELETE=1`).
 
+## FreeConvert cloud hardsub
+
+Set `FC_API_KEYS` (one or more keys, comma-separated; the first with minutes
+left is used) to enable the **☁️ FC hardsub** flows. The video is never
+downloaded by the bot: FreeConvert imports it straight from the link.
+
+**Direct link** — send the link → *☁️ FC hardsub* → quality (360p YouTube /
+480p YouTube / 720p Facebook / 1080p / Original) → style (A, B, C, D or
+*Sans changement*) → send the subtitle → the cloud encode starts → the result
+is uploaded.
+
+**Magnet (Seedr)** — send the magnet → pick episodes → *☁️ FC hardsub* →
+quality → style → one job per episode. Nothing else is asked: the bot uses the
+subtitle matched in the torrent, otherwise it extracts the video's own
+**French** text track. If neither exists the job pauses and asks for a subtitle
+file instead of failing.
+
+Notes:
+- Extracting a track from a remote MKV streams the whole file (tracks are
+  interleaved with the video), so it takes as long as reading the episode.
+- Output is capped by `MAX_OUTPUT_SIZE_MB`; pick a lower quality if 1080p is
+  too big.
+- Style C embeds Gandhi Sans from `bot/assets/fonts/`.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -250,4 +274,4 @@ limits, FloodWait-tolerant progress editing and the release-name cleaning
 rules were carried over from
 [vicMenma/Zilong_multiusage](https://github.com/vicMenma/Zilong_multiusage)
 and reimplemented cleanly on aiohttp. See [docs/AUDIT.md](docs/AUDIT.md) for
-the full audit of what was reused and why the rest was not.
+the full audit of what was reused and why the rest was not.**
