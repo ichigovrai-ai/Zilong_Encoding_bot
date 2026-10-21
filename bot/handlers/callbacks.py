@@ -8,7 +8,7 @@ from pyrogram import Client, enums
 from pyrogram.types import CallbackQuery
 
 from bot.handlers import wizard
-from bot.jobs.models import Job, JobKind
+from bot.jobs.models import InputType, Job, JobKind
 from bot.jobs.states import TERMINAL, JobStatus
 from bot.runtime import Runtime, get_runtime
 from bot.ui import keyboards
@@ -335,6 +335,34 @@ async def _handle_action(rt: Runtime, cb: CallbackQuery, job: Job,
         await rt.manager.enqueue(job.id)
         return
 
+    if action == "fchs":
+        # Direct link → cloud hardsub through FreeConvert.
+        if not rt.config.fc_enabled:
+            await cb.answer("FreeConvert isn't configured (FC_API_KEYS).",
+                            show_alert=True)
+            return
+        if job.input_type != InputType.URL:
+            await cb.answer("FC hardsub needs a direct link.", show_alert=True)
+            return
+        text, kb = await wizard.enter_kind(rt, job, JobKind.FC_HARDSUB)
+        await cb.answer()
+        await _edit(cb, text, kb)
+        return
+
+    if action == "fcmag":
+        # Seedr episodes → cloud hardsub through FreeConvert.
+        if not rt.config.fc_enabled:
+            await cb.answer("FreeConvert isn't configured (FC_API_KEYS).",
+                            show_alert=True)
+            return
+        if not (job.seedr.get("selected") or []):
+            await cb.answer("Select at least one episode.", show_alert=True)
+            return
+        text, kb = await wizard.enter_fc_magnet(rt, job)
+        await cb.answer()
+        await _edit(cb, text, kb)
+        return
+
     if action in (JobKind.ENCODE, JobKind.COMPRESS, JobKind.CONVERT,
                   JobKind.HARDSUB):
         job.options["av1_ok"] = bool(rt.capabilities.get("libsvtav1"))
@@ -425,5 +453,6 @@ async def _handle_episode_verb(rt: Runtime, cb: CallbackQuery, job: Job,
                 if m.get("confidence") == MatchConfidence.UNCERTAIN.value
             ),
         ),
-        keyboards.episodes_menu(job.id, fresh_matches, fresh_selected),
+        keyboards.episodes_menu(job.id, fresh_matches, fresh_selected,
+                                fc=rt.config.fc_enabled),
     )
