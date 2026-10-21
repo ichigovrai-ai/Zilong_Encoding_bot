@@ -1,4 +1,4 @@
-**# Zilong Encoding Bot
+# Zilong Encoding Bot
 
 A Telegram bot focused on **video encoding, resolution conversion,
 compression, subtitle processing and automated Seedr hardsubbing**.
@@ -274,4 +274,4 @@ limits, FloodWait-tolerant progress editing and the release-name cleaning
 rules were carried over from
 [vicMenma/Zilong_multiusage](https://github.com/vicMenma/Zilong_multiusage)
 and reimplemented cleanly on aiohttp. See [docs/AUDIT.md](docs/AUDIT.md) for
-the full audit of what was reused and why the rest was not.**
+the full audit of what was reused and why the rest was not.
