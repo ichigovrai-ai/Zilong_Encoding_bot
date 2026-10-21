@@ -11,7 +11,7 @@ OWNER_ID  = ""   # @param {type:"string"}
 # @markdown ### 🔒 Repository
 # @markdown `owner/repo` or a full https URL. If the repo is PRIVATE, put a
 # @markdown GitHub token (read access) in Secrets as GITHUB_TOKEN, or here.
-REPO_URL     = ""      # @param {type:"string"}
+REPO_URL     = "https://github.com/ichigovrai-ai/Zilong_Encoding_bot"  # @param {type:"string"}
 REPO_BRANCH  = "main"  # @param {type:"string"}
 GITHUB_TOKEN = ""      # @param {type:"string"}
 
