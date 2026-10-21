@@ -88,6 +88,10 @@ class Config:
     seedr_poll_interval: float = 10.0
     seedr_timeout_hours: float = 4.0
 
+    # FreeConvert — one or more API keys (comma-separated). The bot uses the
+    # first key that still has conversion minutes left (see freeconvert.py).
+    fc_api_keys: tuple[str, ...] = ()
+
     # UX
     progress_update_interval: float = 4.0
 
@@ -106,6 +110,15 @@ class Config:
     @property
     def seedr_password(self) -> str:
         return self.seedr_accounts[0][1] if self.seedr_accounts else ""
+
+    @property
+    def fc_enabled(self) -> bool:
+        return bool(self.fc_api_keys)
+
+    @property
+    def fc_keys_csv(self) -> str:
+        """Keys in the comma-separated form freeconvert.py expects."""
+        return ",".join(self.fc_api_keys)
 
     def seedr_credentials(self, username: str) -> tuple[str, str]:
         """Return (user, pass) for a stored username, else the first account."""
@@ -198,8 +211,11 @@ class Config:
                 "Configuration invalid:\n  - " + "\n  - ".join(errors)
             )
 
+        fc_api_keys = tuple(k.strip() for k in opt("FC_API_KEYS").split(",")
+                            if k.strip())
+
         secrets = tuple(s for s in (bot_token, api_hash, seedr_proxy,
-                                    *seedr_pwds) if s)
+                                    *seedr_pwds, *fc_api_keys) if s)
 
         cfg = cls(
             api_id=api_id,
@@ -239,6 +255,7 @@ class Config:
             seedr_auto_delete=opt("SEEDR_AUTO_DELETE", "1").lower() in ("1", "true", "yes"),
             seedr_poll_interval=num("SEEDR_POLL_INTERVAL", 10.0, 3.0, 120.0),
             seedr_timeout_hours=num("SEEDR_TIMEOUT_HOURS", 4.0, 0.1, 24.0),
+            fc_api_keys=fc_api_keys,
             progress_update_interval=num("PROGRESS_UPDATE_INTERVAL", 4.0, 2.0, 60.0),
             secrets=secrets,
         )
