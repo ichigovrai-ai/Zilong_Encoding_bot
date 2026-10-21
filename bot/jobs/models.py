@@ -33,6 +33,8 @@ class JobKind:
     CONVERT = "convert"
     HARDSUB = "hardsub"
     SEEDR_HARDSUB = "seedr_hardsub"
+    # Cloud hardsub through FreeConvert (direct link, or one Seedr episode).
+    FC_HARDSUB = "fc_hardsub"
     EXTRACT = "extract"
     MEDIAINFO = "mediainfo"
     CONVERTSUB = "convertsub"
