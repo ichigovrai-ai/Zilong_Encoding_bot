@@ -325,9 +325,37 @@ async def _handle_action(rt: Runtime, cb: CallbackQuery, job: Job,
                     keyboards.extract_menu(job.id, n_subs or 1, n_audio or 1))
         return
 
-    if action in ("exsub", "exaud"):
-        job.options["extract_target"] = ("subtitles" if action == "exsub"
-                                         else "audio")
+    if action == "exsub":
+        # Several text subtitle tracks → let the user choose which one(s).
+        subs = (job.options.get("probe") or {}).get("subs") or []
+        text_subs = [s for s in subs if not s.get("bitmap")]
+        if len(text_subs) > 1:
+            await cb.answer()
+            await _edit(cb, "💬 Which subtitle do you want to extract?",
+                        keyboards.extract_subs_menu(job.id, subs))
+            return
+        job.options["extract_target"] = "subtitles"
+        job.options["extract_streams"] = "all"
+        await rt.repo.update_fields(job.id, kind=JobKind.EXTRACT,
+                                    options=job.options)
+        await cb.answer("Queued.")
+        await _edit(cb, "📤 Extracting…", keyboards.cancel_only(job.id))
+        await rt.manager.enqueue(job.id)
+        return
+
+    if action == "exsall" or (action.startswith("exs") and action[3:].isdigit()):
+        job.options["extract_target"] = "subtitles"
+        job.options["extract_streams"] = ("all" if action == "exsall"
+                                          else [int(action[3:])])
+        await rt.repo.update_fields(job.id, kind=JobKind.EXTRACT,
+                                    options=job.options)
+        await cb.answer("Queued.")
+        await _edit(cb, "📤 Extracting…", keyboards.cancel_only(job.id))
+        await rt.manager.enqueue(job.id)
+        return
+
+    if action == "exaud":
+        job.options["extract_target"] = "audio"
         await rt.repo.update_fields(job.id, kind=JobKind.EXTRACT,
                                     options=job.options)
         await cb.answer("Queued.")
