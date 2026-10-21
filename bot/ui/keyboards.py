@@ -276,6 +276,22 @@ def seedr_confirm_menu(arg: str, label: str) -> InlineKeyboardMarkup:
     ])
 
 
+def extract_subs_menu(job_id: str, streams: list[dict]) -> InlineKeyboardMarkup:
+    """Pick which embedded text subtitle(s) to extract (bitmap ones are skipped)."""
+    text = [s for s in streams if not s.get("bitmap")]
+    rows = []
+    if len(text) > 1:
+        rows.append([_btn(f"📦 All text subtitles ({len(text)})", "a", job_id, "exsall")])
+    for s in text[:30]:
+        label = f"#{s['type_index']} {s['language']} {s['codec']}"
+        if s.get("title"):
+            label += f" · {s['title'][:15]}"
+        rows.append([_btn(label[:60], "a", job_id, f"exs{s['type_index']}")])
+    rows.append([_btn("⬅️ Back", "a", job_id, "extract"),
+                 _btn("✖️ Cancel", "x", job_id)])
+    return InlineKeyboardMarkup(rows)
+
+
 def extract_menu(job_id: str, n_subs: int, n_audio: int) -> InlineKeyboardMarkup:
     rows = []
     if n_subs:
