@@ -532,6 +532,146 @@ async def hardsub_remote_url(
     return await _download_file(url, output_path, download_cb)
 
 
+def _create_hardsub_multi_payload(
+    *,
+    video_url: str,
+    input_format: str,
+    output_format: str,
+    qualities: dict[str, Optional[tuple[int, int]]],
+    output_filenames: dict[str, str],
+    subtitle_b64: str,
+    crf: int,
+    speed: str,
+) -> dict:
+    """Un seul import/url de la vidéo, puis un hardsub + un export par entrée
+    de `qualities` — le sous-titre (déjà stylé) et la vidéo ne sont envoyés
+    qu'une fois, quel que soit le nombre de sorties demandées."""
+    tasks: dict = {
+        "import-video": {"operation": "import/url", "url": video_url},
+    }
+    for quality, resize in qualities.items():
+        options = {
+            "video_codec": "libx264",
+            "video_rate_control_h264": "crf",
+            "video_crf_h264": crf,
+            "video_encoding_speed_h264_265": speed,
+            "audio_codec": "aac",
+            "audio_bitrate_aac": "128k",
+            "subtitle_add": "upload",
+            "subtitle": subtitle_b64,
+            "subtitle_mode": "hard",
+        }
+        if resize:
+            width, height = resize
+            options["adjust_video_settings"] = "change-resolution"
+            options["video_screen_size"] = f"{width}:{height}"
+        convert_name = f"convert_{quality}"
+        tasks[convert_name] = {
+            "operation": "convert",
+            "input": "import-video",
+            "input_format": input_format,
+            "output_format": output_format,
+            "filename": os.path.basename(output_filenames[quality]),
+            "options": options,
+        }
+        tasks[f"export_{quality}"] = {
+            "operation": "export/url",
+            "input": [convert_name],
+        }
+    return {"tasks": tasks}
+
+
+async def hardsub_remote_url_multi(
+    api_keys: str,
+    video_url: str,
+    source_name: str,
+    subtitle_path: str,
+    dest_dir: str,
+    *,
+    qualities: dict[str, Optional[tuple[int, int]]],
+    quality_profile: str = "balanced",
+    style_key: str = DEFAULT_STYLE_KEY,
+    codec: Optional[str] = None,
+    process_cb: ProgressCB = None,
+    download_cb: ProgressCB = None,
+) -> dict[str, str]:
+    """Hardsub en PLUSIEURS qualités avec un seul job FreeConvert.
+
+    `qualities` : {étiquette: (largeur, hauteur) | None}, ex.
+    {"720p": (1280, 720), "480p": (854, 480)} (None = résolution d'origine,
+    étiquette "orig"). Le sous-titre est stylé et envoyé une seule fois, la
+    vidéo n'est importée qu'une fois ; chaque qualité devient une tâche
+    convert + export.
+
+    Retourne {étiquette: chemin_du_fichier}. Une qualité dont l'export a
+    échoué est absente du résultat (log warning) plutôt que de faire échouer
+    tout le job ; si aucune n'a abouti, une erreur est levée.
+    """
+    keys = parse_api_keys(api_keys)
+    api_key = await pick_working_key(keys)
+    cfg = QUALITY_PROFILES[normalize_quality_profile(quality_profile)]
+
+    clean_source_name = unquote(source_name)
+    base = os.path.splitext(os.path.basename(clean_source_name))[0]
+    input_format = os.path.splitext(clean_source_name)[1].lstrip(".").lower() or "mkv"
+
+    codec_key, fc_codec_opts, audio_kbps = await _codec_setup(api_key, codec, cfg, input_format)
+
+    output_filenames: dict[str, str] = {}
+    output_paths: dict[str, str] = {}
+    for quality, resize in qualities.items():
+        suffix = resolution_label(resize[1]) if resize else None
+        name = build_final_name(
+            clean_source_name, override_quality=suffix, output_ext="mp4",
+            keep_quality_tag=len(qualities) > 1,
+        )
+        output_filenames[quality] = name
+        output_paths[quality] = os.path.join(dest_dir, name)
+
+    styled_sub_path = os.path.join(dest_dir, f"{base}.VOSTFR.ass")
+    apply_hardsub_style(subtitle_path, styled_sub_path, style_key=style_key)
+    try:
+        subtitle_b64 = _encode_subtitle_b64(styled_sub_path)
+    finally:
+        if os.path.exists(styled_sub_path):
+            try:
+                os.remove(styled_sub_path)
+            except Exception as exc:
+                log.warning("Impossible de supprimer le sous-titre stylé temporaire: %s", exc)
+
+    payload = _create_hardsub_multi_payload(
+        video_url=video_url, input_format=input_format, output_format="mp4",
+        qualities=qualities, output_filenames=output_filenames,
+        subtitle_b64=subtitle_b64, crf=cfg.crf, speed=cfg.speed,
+    )
+    for task_name, task in payload["tasks"].items():
+        if task_name.startswith("convert_"):
+            merge_fc_video_options(task["options"], fc_codec_opts, audio_kbps)
+
+    job = await _post_job(api_key, payload)
+    job_id = job.get("id", "?")
+    job = await _wait_for_job(api_key, job_id, process_cb)
+
+    results: dict[str, str] = {}
+    for quality in qualities:
+        export_task = _find_task(job, f"export_{quality}")
+        url = _task_export_url(export_task) if export_task else ""
+        if not url:
+            log.warning("⚠️ FreeConvert : pas d'URL d'export pour la qualité %s", quality)
+            continue
+
+        async def _quality_download_cb(pct: float, msg: str, _quality: str = quality) -> None:
+            if download_cb:
+                await download_cb(pct, f"{_quality} — {msg}")
+
+        results[quality] = await _download_file(
+            url, output_paths[quality], _quality_download_cb if download_cb else None
+        )
+    if not results:
+        raise RuntimeError("FreeConvert a terminé sans aucun fichier exporté.")
+    return results
+
+
 # Note : l'import par URL distante (task "import/url") fait une simple requête
 # HTTP côté serveur FreeConvert. Il faut donc une URL directe vers le fichier
 # vidéo (lien CDN, lien Seedr signé…). Pour une source qui n'est pas
