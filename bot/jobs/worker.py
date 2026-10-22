@@ -183,6 +183,11 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
                                           style, with_subs)
     token.raise_if_cancelled()
 
+    if job.kind == JobKind.DOWNLOAD:
+        await _run_download(rt, job, input_path, work, token, reporter,
+                            started, style, upload_pref)
+        return
+
     # ── 2. Probe ────────────────────────────────────────────────────────
     await rt.repo.transition(job.id, JobStatus.PROBING, stage="probing")
     analyse_stages = panels.stage_checklist(
@@ -602,6 +607,101 @@ async def _run_encode(rt: Runtime, job: Job, plan: EncodePlan, media: MediaInfo,
         )
 
 
+def _episode_prefix(job: Job) -> str:
+    """'S01E02_' / 'E02_' for episode jobs spawned from a magnet batch, so the
+    extracted files of several episodes don't all share the same name."""
+    if not job.seedr.get("parent"):
+        return ""
+    from bot.utils.matching import extract_episode
+    ep = extract_episode(job.input_name)
+    if ep is None:
+        return ""
+    return (f"S{ep.season:02d}E{ep.episode:02d}_" if ep.season is not None
+            else f"E{ep.episode:02d}_")
+
+
+async def _run_download(rt: Runtime, job: Job, input_path: Path, work: Path,
+                        token: CancelToken, reporter: ProgressReporter,
+                        started: float, style: str, upload_pref: str) -> None:
+    """Plain download: send the fetched file to Telegram exactly as received."""
+    import html
+    import shutil
+    from bot.utils.filenames import sanitize_filename
+    cfg = rt.config
+    out_dir = work / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    final = unique_path(out_dir / sanitize_filename(job.input_name
+                                                    or input_path.name))
+    shutil.move(str(input_path), str(final))
+    size = final.stat().st_size
+    if size == 0:
+        raise DownloadError("The downloaded file is empty.")
+    if size > cfg.max_output_size:
+        raise ValidationError(
+            f"The file ({size // 1024**2} MB) exceeds the configured upload "
+            f"limit ({cfg.max_output_size // 1024**2} MB)."
+        )
+    await rt.repo.update_fields(job.id, output_path=str(final))
+    await rt.repo.transition(job.id, JobStatus.UPLOADING, stage="uploading")
+
+    media: MediaInfo | None = None
+    try:
+        media = await probe_media(str(final), ffprobe=cfg.ffprobe_path)
+    except ProbeError:
+        log.info("Download %s is not a probe-able media file — sending as is",
+                 job.id)
+    thumbs = None
+    if media is not None and media.video:
+        thumbs = await make_thumbnails(
+            str(final), out_dir, media.duration, media=media,
+            ffmpeg=cfg.ffmpeg_path, cancel_token=token,
+        )
+
+    upload_started = time.monotonic()
+
+    async def _upl_progress(done: int, total: int) -> None:
+        await rt.repo.update_fields(job.id,
+                                    progress=done / total * 100 if total else 0)
+        elapsed_ul = time.monotonic() - upload_started
+        speed = done / elapsed_ul if elapsed_ul > 1 else 0.0
+        await reporter.update(
+            panels.transfer_panel(
+                title="Uploading", icon="📤", filename=final.name,
+                done=done, total=total, speed=speed, elapsed=elapsed_ul,
+                source="Telegram 📲", stages=[], style=style,
+            ),
+            reply_markup=keyboards.cancel_only(job.id),
+        )
+
+    async with rt.manager.upload_sem:
+        token.raise_if_cancelled()
+        await upload_file(
+            rt.client, job.chat_id, final,
+            media=media, caption=f"📥 {html.escape(final.name)}",
+            thumb=thumbs.thumb if thumbs else None,
+            cover=thumbs.cover if thumbs else None,
+            as_video=should_send_as_video(
+                final, media,
+                str(job.options.get("upload_as") or upload_pref or "auto"),
+            ),
+            progress_cb=_upl_progress,
+            cancelled=lambda: token.cancelled,
+        )
+
+    await rt.repo.transition(job.id, JobStatus.COMPLETED, stage="done")
+    await reporter.update(
+        panels.done_panel(
+            filename=final.name, out_size=size,
+            elapsed=time.monotonic() - started,
+            settings_line="Downloaded as-is", job_id=job.id,
+        ),
+        force=True,
+    )
+    from bot.services.cleanup import cleanup_job_dir
+    await cleanup_job_dir(rt.repo, cfg.work_dir, job.id)
+    await _maybe_delete_seedr_folder(rt, job.id)
+
+
 async def _run_extract(rt: Runtime, job: Job, media: MediaInfo,
                        input_path: Path, work: Path, token: CancelToken,
                        reporter: ProgressReporter) -> None:
@@ -635,7 +735,8 @@ async def _run_extract(rt: Runtime, job: Job, media: MediaInfo,
                                                      stream.title)
             used[code] = used.get(code, 0) + 1
             suffix = f"_{used[code]}" if used[code] > 1 else ""
-            label = f"Subtitle_{code}{suffix}{Path(path).suffix}"
+            label = (f"{_episode_prefix(job)}Subtitle_{code}{suffix}"
+                     f"{Path(path).suffix}")
             caption = f"{flag} {lang_name} · {stream.codec}"
             if stream.title:
                 caption += f" · {stream.title[:40]}"
@@ -650,7 +751,11 @@ async def _run_extract(rt: Runtime, job: Job, media: MediaInfo,
                 str(input_path), i, work / "output",
                 ffmpeg=cfg.ffmpeg_path, cancel_token=token,
             )
-            await rt.client.send_document(job.chat_id, path)
+            await rt.client.send_document(
+                job.chat_id, path,
+                file_name=f"{_episode_prefix(job)}Audio_{i + 1}"
+                          f"{Path(path).suffix}",
+            )
             sent += 1
         if not sent:
             raise ExtractionError("No audio streams found.")
@@ -658,6 +763,7 @@ async def _run_extract(rt: Runtime, job: Job, media: MediaInfo,
     await reporter.update(f"✅ Extracted {sent} stream(s).", force=True)
     from bot.services.cleanup import cleanup_job_dir
     await cleanup_job_dir(rt.repo, cfg.work_dir, job.id)
+    await _maybe_delete_seedr_folder(rt, job.id)
 
 
 # ═════════════════════════════════════════════════════════════════════════
