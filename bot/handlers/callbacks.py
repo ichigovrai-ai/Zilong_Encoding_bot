@@ -320,9 +320,34 @@ async def _handle_action(rt: Runtime, cb: CallbackQuery, job: Job,
         p = job.options.get("probe") or {}
         n_subs = len(p.get("subs") or [])
         n_audio = int(p.get("n_audio") or 0)
+        is_link = job.input_type == InputType.URL
         await cb.answer()
-        await _edit(cb, "What should I extract?",
-                    keyboards.extract_menu(job.id, n_subs or 1, n_audio or 1))
+        await _edit(cb, "What do you want to do?" if is_link
+                    else "What should I extract?",
+                    keyboards.extract_menu(job.id, n_subs or 1, n_audio or 1,
+                                           dl=is_link))
+        return
+
+    if action == "mtools":
+        # Seedr episode picker → extract / download submenu.
+        if job.kind != JobKind.SEEDR_HARDSUB:
+            await cb.answer("This option is for magnet episodes.",
+                            show_alert=True)
+            return
+        n = len(job.seedr.get("selected") or [])
+        if not n:
+            await cb.answer("Select at least one episode.", show_alert=True)
+            return
+        await cb.answer()
+        await _edit(cb, f"📤 <b>{n}</b> episode(s) selected — "
+                        "what do you want to do with them?",
+                    keyboards.magnet_tools_menu(job.id))
+        return
+
+    if action == "mback":
+        text, kb = wizard.render_episodes(rt, job)
+        await cb.answer()
+        await _edit(cb, text, kb)
         return
 
     if action == "exsub":
@@ -361,6 +386,42 @@ async def _handle_action(rt: Runtime, cb: CallbackQuery, job: Job,
         await cb.answer("Queued.")
         await _edit(cb, "📤 Extracting…", keyboards.cancel_only(job.id))
         await rt.manager.enqueue(job.id)
+        return
+
+    if action == "dl":
+        # Direct link → fetch the file and send it to Telegram untouched.
+        if job.input_type != InputType.URL:
+            await cb.answer("Download only works on direct links.",
+                            show_alert=True)
+            return
+        await rt.repo.update_fields(job.id, kind=JobKind.DOWNLOAD,
+                                    options=job.options)
+        await cb.answer("Queued.")
+        await _edit(cb, "📥 Downloading…", keyboards.cancel_only(job.id))
+        await rt.manager.enqueue(job.id)
+        return
+
+    if action in ("mxsub", "mxaud", "mdl"):
+        # Seedr episodes → extract subtitles / audio, or plain download.
+        if job.kind != JobKind.SEEDR_HARDSUB:
+            await cb.answer("This option is for magnet episodes.",
+                            show_alert=True)
+            return
+        if not (job.seedr.get("selected") or []):
+            await cb.answer("Select at least one episode.", show_alert=True)
+            return
+        if action == "mdl":
+            kind, options, label = JobKind.DOWNLOAD, {}, "📥 download"
+        elif action == "mxsub":
+            kind, label = JobKind.EXTRACT, "💬 subtitle extraction"
+            options = {"extract_target": "subtitles", "extract_streams": "all"}
+        else:
+            kind, label = JobKind.EXTRACT, "🔊 audio extraction"
+            options = {"extract_target": "audio"}
+        await cb.answer("Starting…")
+        n = await wizard.spawn_seedr_tasks(rt, job, kind, options)
+        await _edit(cb, f"🚀 <b>Queued {n} episode(s)</b> — {label}\n\n"
+                        "<i>Track them with /queue.</i>")
         return
 
     if action == "fchs":
