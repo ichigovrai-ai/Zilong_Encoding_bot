@@ -135,6 +135,7 @@ async def intake_media(rt: Runtime, message: Any, *,
     text = (messages.media_summary(media, filename) if media
             else (f"<b>🎞 Video received</b>\n\n<code>{filename}</code> · "
                   f"{human_size(size)}\n\nChoose an action:"))
+    job.options["menu_text"] = text
     sent = await message.reply_text(
         text, reply_markup=keyboards.action_menu(job.id, bool(media and media.subtitles)),
         parse_mode=enums.ParseMode.HTML, quote=True,
@@ -190,7 +191,9 @@ async def intake_url(rt: Runtime, message: Any, url: str) -> None:
         await message.reply_text(f"⚠️ {exc}")
         return
 
-    name = sanitize_filename(Path(url.split("?")[0]).name or "video.mp4")
+    from urllib.parse import unquote
+    name = sanitize_filename(
+        unquote(Path(url.split("?")[0]).name) or "video.mp4")
     job = Job(
         id=new_job_id(),
         user_id=message.from_user.id,
@@ -215,10 +218,12 @@ async def intake_url(rt: Runtime, message: Any, url: str) -> None:
     text = (messages.media_summary(media, name) if media
             else (f"<b>🔗 Link received</b>\n\n<code>{name}</code>\n\n"
                   "Choose an action:"))
+    job.options["menu_text"] = text
     sent = await message.reply_text(
         text,
         reply_markup=keyboards.action_menu(
-            job.id, bool(media and media.subtitles), fc=rt.config.fc_enabled),
+            job.id, bool(media and media.subtitles), fc=rt.config.fc_enabled,
+            dl=True),
         parse_mode=enums.ParseMode.HTML, quote=True,
         disable_web_page_preview=True,
     )
