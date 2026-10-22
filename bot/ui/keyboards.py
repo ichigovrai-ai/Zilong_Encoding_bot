@@ -21,13 +21,14 @@ def _nav_row(job_id: str, back: bool = True) -> list[InlineKeyboardButton]:
 
 
 def action_menu(job_id: str, has_subtitle_streams: bool,
-                fc: bool = False) -> InlineKeyboardMarkup:
+                fc: bool = False, dl: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [_btn("🎬 Encode", "a", job_id, "encode"),
          _btn("🗜 Compress", "a", job_id, "compress")],
         [_btn("🔄 Convert", "a", job_id, "convert"),
          _btn("💬 Hardsub", "a", job_id, "hardsub")],
-        [_btn("📤 Extract streams", "a", job_id, "extract"),
+        [_btn("📤 Extract / Download" if dl else "📤 Extract streams",
+              "a", job_id, "extract"),
          _btn("📋 Media info", "a", job_id, "minfo")],
         [_btn("✖️ Cancel", "x", job_id)],
     ]
@@ -47,8 +48,18 @@ FC_QUALITIES: tuple[tuple[str, str], ...] = (
 )
 
 
-def fc_quality_menu(job_id: str) -> InlineKeyboardMarkup:
-    rows = [[_btn(label, "fq", job_id, arg)] for arg, label in FC_QUALITIES]
+# Most qualities one FreeConvert run may produce (each one costs conversion time).
+FC_MAX_QUALITIES = 3
+
+
+def fc_quality_menu(job_id: str, selected=()) -> InlineKeyboardMarkup:
+    """Multi-select: tapping a quality toggles its ✅; once at least one is
+    ticked a Done button appears to move on to the style step."""
+    chosen = [str(a) for a in selected]
+    rows = [[_btn(f"✅ {label}" if arg in chosen else label, "fq", job_id, arg)]
+            for arg, label in FC_QUALITIES]
+    if chosen:
+        rows.append([_btn(f"✔️ Done ({len(chosen)})", "fq", job_id, "done")])
     rows.append(_nav_row(job_id))
     return InlineKeyboardMarkup(rows)
 
@@ -215,6 +226,8 @@ def episodes_menu(job_id: str, matches: list[dict[str, Any]],
                  _btn("🚀 Continue", "go", job_id)])
     if fc:
         rows.append([_btn("☁️ FC hardsub", "a", job_id, "fcmag")])
+    # Alternatives to the hardsub encode, one submenu for the selected episodes.
+    rows.append([_btn("📤 Extract / Download", "a", job_id, "mtools")])
     rows.append([_btn("✖️ Cancel", "x", job_id)])
     return InlineKeyboardMarkup(rows)
 
@@ -292,11 +305,27 @@ def extract_subs_menu(job_id: str, streams: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def extract_menu(job_id: str, n_subs: int, n_audio: int) -> InlineKeyboardMarkup:
+def extract_menu(job_id: str, n_subs: int, n_audio: int,
+                 dl: bool = False) -> InlineKeyboardMarkup:
     rows = []
     if n_subs:
         rows.append([_btn(f"💬 Extract subtitles ({n_subs})", "a", job_id, "exsub")])
     if n_audio:
         rows.append([_btn(f"🔊 Extract audio ({n_audio})", "a", job_id, "exaud")])
+    if dl:
+        # Direct links: fetch the file and send it as-is.
+        rows.append([_btn("📥 Download only", "a", job_id, "dl")])
     rows.append(_nav_row(job_id))
     return InlineKeyboardMarkup(rows)
+
+
+def magnet_tools_menu(job_id: str) -> InlineKeyboardMarkup:
+    """Submenu of the Seedr episode picker: act on the selected episodes
+    without re-encoding them."""
+    return InlineKeyboardMarkup([
+        [_btn("💬 Extract subtitles", "a", job_id, "mxsub")],
+        [_btn("🔊 Extract audio", "a", job_id, "mxaud")],
+        [_btn("📥 Download only", "a", job_id, "mdl")],
+        [_btn("⬅️ Back", "a", job_id, "mback"),
+         _btn("✖️ Cancel", "x", job_id)],
+    ])
