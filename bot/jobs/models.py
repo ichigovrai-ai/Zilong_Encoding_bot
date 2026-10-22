@@ -36,6 +36,8 @@ class JobKind:
     # Cloud hardsub through FreeConvert (direct link, or one Seedr episode).
     FC_HARDSUB = "fc_hardsub"
     EXTRACT = "extract"
+    # Plain download: fetch the file/link and send it to Telegram untouched.
+    DOWNLOAD = "download"
     MEDIAINFO = "mediainfo"
     CONVERTSUB = "convertsub"
 
