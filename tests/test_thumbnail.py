@@ -68,3 +68,95 @@ async def test_missing_file_returns_empty(tmp_path: Path):
     ts = await make_thumbnails(str(tmp_path / "nope.mkv"), tmp_path, 6.0)
     assert isinstance(ts, ThumbSet)
     assert ts.cover is None and ts.thumb is None
+
+
+# ── random frame selection ────────────────────────────────────────────────
+import random
+
+from bot.services import thumbnail as thumb_mod
+from bot.services.thumbnail import fixed_seek, pick_seek
+
+
+def test_pick_seek_stays_inside_the_safe_window():
+    rng = random.Random(1)
+    for dur in (9.0, 30.0, 600.0, 1380.0, 7200.0):
+        margin = max(6.0, dur * 0.04)
+        lo = max(3.0, dur * 0.04)
+        for _ in range(300):
+            s = pick_seek(dur, rng)
+            assert lo <= s <= max(lo, dur - margin), (dur, s)
+
+
+def test_pick_seek_covers_the_whole_video_not_just_one_spot():
+    rng = random.Random(7)
+    seeks = [pick_seek(1380.0, rng) for _ in range(400)]    # a 23-minute episode
+    assert min(seeks) < 1380 * 0.15 and max(seeks) > 1380 * 0.80
+    assert len(set(seeks)) > 300                            # genuinely varied
+
+
+def test_pick_seek_short_video_uses_the_start():
+    assert pick_seek(5.0) == 0.0 and pick_seek(8.0) == 0.0
+
+
+def test_fixed_seek_is_the_old_behaviour():
+    assert fixed_seek(1000.0) == 120.0 and fixed_seek(10.0) == 3.0
+    assert fixed_seek(5.0) == 0.0
+
+
+class _FakeRun:
+    """Stands in for run_process: records -ss, optionally fails first call."""
+    def __init__(self, fail_first: bool = False):
+        self.seeks: list[float] = []
+        self.fail_first = fail_first
+
+    async def __call__(self, args, timeout=0, cancel_token=None):
+        out = Path(args[-1])
+        if "-ss" in args:
+            self.seeks.append(float(args[args.index("-ss") + 1]))
+        if self.fail_first and len(self.seeks) == 1 and out.name == "cover.jpg":
+            return 1, "", "boom"
+        out.write_bytes(b"\xff\xd8" + b"0" * 1000)
+        return 0, "", ""
+
+
+async def test_make_thumbnails_uses_a_random_seek(tmp_path, monkeypatch):
+    fake = _FakeRun()
+    monkeypatch.setattr(thumb_mod, "run_process", fake)
+    a = await make_thumbnails("v.mkv", tmp_path, 1380.0, rng=random.Random(1))
+    b = await make_thumbnails("v.mkv", tmp_path, 1380.0, rng=random.Random(2))
+    assert a.cover and b.cover
+    assert fake.seeks[0] != fake.seeks[1]                    # not always the same frame
+    assert fake.seeks[0] == pick_seek(1380.0, random.Random(1))
+
+
+async def test_randomize_false_keeps_the_fixed_position(tmp_path, monkeypatch):
+    fake = _FakeRun()
+    monkeypatch.setattr(thumb_mod, "run_process", fake)
+    await make_thumbnails("v.mkv", tmp_path, 1000.0, randomize=False)
+    assert fake.seeks[0] == 120.0
+
+
+async def test_falls_back_to_fixed_seek_when_random_one_fails(tmp_path, monkeypatch):
+    fake = _FakeRun(fail_first=True)
+    monkeypatch.setattr(thumb_mod, "run_process", fake)
+    ts = await make_thumbnails("v.mkv", tmp_path, 1000.0, rng=random.Random(3))
+    assert ts.cover and ts.thumb                              # preview not lost
+    assert fake.seeks[0] != 120.0 and fake.seeks[1] == 120.0  # random, then fixed
+
+
+@needs_ffmpeg
+async def test_real_ffmpeg_frames_differ_between_calls(tmp_path: Path):
+    src = tmp_path / "long.mkv"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=12:duration=60",
+         "-c:v", "libx264", "-preset", "ultrafast", str(src)],
+        check=True,
+    )
+    covers = []
+    for seed in (11, 22, 33):
+        out = tmp_path / f"o{seed}"
+        ts = await make_thumbnails(str(src), out, 60.0, rng=random.Random(seed))
+        assert ts.cover and ts.thumb
+        covers.append(Path(ts.cover).read_bytes())
+    assert len(set(covers)) >= 2          # the testsrc2 counter differs per moment
