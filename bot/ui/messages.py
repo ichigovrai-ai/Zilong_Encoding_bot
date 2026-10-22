@@ -103,7 +103,8 @@ def wizard_header(job: Job) -> str:
         parts.append({"hard": "🔥 hardsub", "soft": "📎 soft subs"}.get(
             o["subtitle_mode"], o["subtitle_mode"]))
     kind_icon = {"encode": "🎬", "compress": "🗜", "convert": "🔄",
-                 "hardsub": "🔥", "seedr_hardsub": "🧲"}.get(job.kind, "🎬")
+                 "hardsub": "🔥", "seedr_hardsub": "🧲", "download": "📥",
+                 "extract": "📤"}.get(job.kind, "🎬")
     chosen = " · ".join(parts) if parts else "nothing chosen yet"
     return (f"{kind_icon} <b>{escape(job.kind.replace('_', ' ').upper())}</b>\n"
             f"{SEP}\n"
