@@ -87,9 +87,40 @@ def target_size(res: int, src_w: int = 0, src_h: int = 0) -> tuple[int, int] | N
     return fixed
 
 
-def _settings_line(job: Job) -> str:
-    q = dict(keyboards.FC_QUALITIES).get(str(job.options.get("fc_res", 0)),
-                                         "Original quality")
+def fc_res_list(options: dict) -> list[int]:
+    """Heights chosen for the run, in the order picked (0 = original).
+    Falls back to the single legacy ``fc_res`` option."""
+    out: list[int] = []
+    raw = options.get("fc_res_list")
+    if isinstance(raw, (list, tuple)):
+        for x in raw:
+            try:
+                v = int(x)
+            except (TypeError, ValueError):
+                continue
+            if v not in out:
+                out.append(v)
+    if not out:
+        try:
+            out = [int(options.get("fc_res", 0) or 0)]
+        except (TypeError, ValueError):
+            out = [0]
+    return out[:keyboards.FC_MAX_QUALITIES]
+
+
+def _res_label(res: int) -> str:
+    return "Original" if res == 0 else f"{res}p"
+
+
+def _settings_line(job: Job, res: int | None = None) -> str:
+    """One-line summary. ``res`` pins the line to a single quality (used for
+    each output's caption in a multi-quality run)."""
+    choices = [res] if res is not None else fc_res_list(job.options)
+    if len(choices) == 1:
+        q = dict(keyboards.FC_QUALITIES).get(str(choices[0]),
+                                             "Original quality")
+    else:
+        q = " + ".join(_res_label(r) for r in choices)
     st = STYLE_PRESET_LABELS.get(str(job.options.get("fc_style", "a")), "Style A")
     return f"FreeConvert · {q} · {st}"
 
@@ -216,7 +247,7 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
             "Not enough free disk space on the server — try again later.")
 
     o = job.options
-    res = int(o.get("fc_res", 0))
+    resolutions = fc_res_list(o)
     style_key = str(o.get("fc_style", "a"))
     settings_line = _settings_line(job)
     stages = panels.pipeline_stages("analyse", with_subtitles=True)
@@ -257,7 +288,8 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
     else:
         probe = o.get("probe") or {}
         src_w, src_h = int(probe.get("width") or 0), int(probe.get("height") or 0)
-    resize = target_size(res, src_w, src_h)
+    sizes = {r: target_size(r, src_w, src_h) for r in resolutions}
+    multi = len(resolutions) > 1
 
     # ── 3. FreeConvert ──────────────────────────────────────────────────
     await rt.repo.transition(job.id, JobStatus.ENCODING, stage="encoding")
@@ -287,80 +319,134 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
             reply_markup=keyboards.cancel_only(job.id),
         )
 
-    output = await _cancellable(
-        freeconvert.hardsub_remote_url(
-            cfg.fc_keys_csv, video_url, job.input_name, sub_path, str(out_dir),
-            quality_profile="balanced", resize=resize, style_key=style_key,
-            codec="h264", process_cb=_on_process, download_cb=_on_download,
-        ),
-        token,
-    )
+    # (quality height, file) for each produced output, in the order picked.
+    outputs: list[tuple[int, Path]] = []
+    if multi:
+        # One FreeConvert job: the video is imported once and the subtitle is
+        # sent once; every selected quality is its own convert + export task.
+        keyed = {(f"{r}p" if r else "orig"): r for r in resolutions}
+        produced = await _cancellable(
+            freeconvert.hardsub_remote_url_multi(
+                cfg.fc_keys_csv, video_url, job.input_name, sub_path,
+                str(out_dir),
+                qualities={k: sizes[r] for k, r in keyed.items()},
+                quality_profile="balanced", style_key=style_key,
+                codec="h264", process_cb=_on_process,
+                download_cb=_on_download,
+            ),
+            token,
+        )
+        outputs = [(keyed[k], Path(p)) for k, p in produced.items()]
+    else:
+        res = resolutions[0]
+        output = await _cancellable(
+            freeconvert.hardsub_remote_url(
+                cfg.fc_keys_csv, video_url, job.input_name, sub_path,
+                str(out_dir),
+                quality_profile="balanced", resize=sizes[res],
+                style_key=style_key, codec="h264",
+                process_cb=_on_process, download_cb=_on_download,
+            ),
+            token,
+        )
+        outputs = [(res, Path(output))]
     token.raise_if_cancelled()
-    output_path = Path(output)
-    await rt.repo.update_fields(job.id, output_path=str(output_path))
-    if not output_path.exists() or output_path.stat().st_size == 0:
-        raise ValidationError("FreeConvert returned an empty file.")
-    out_size = output_path.stat().st_size
-    if out_size > cfg.max_output_size:
-        raise ValidationError(
-            f"The encoded file ({out_size // 1024**2} MB) exceeds the "
-            f"configured output limit ({cfg.max_output_size // 1024**2} MB). "
-            "Pick a lower quality and try again.")
+    await rt.repo.update_fields(job.id, output_path=str(outputs[0][1]))
+
+    # Validate every output; in a multi-quality run a bad one is skipped (and
+    # reported) so the good ones are still delivered.
+    ready: list[tuple[int, Path, int]] = []
+    skipped: list[str] = []
+    limit_mb = cfg.max_output_size // 1024**2
+    for res_h, path in outputs:
+        size = path.stat().st_size if path.exists() else 0
+        if size == 0:
+            if not multi:
+                raise ValidationError("FreeConvert returned an empty file.")
+            skipped.append(f"{_res_label(res_h)}: empty file")
+        elif size > cfg.max_output_size:
+            if not multi:
+                raise ValidationError(
+                    f"The encoded file ({size // 1024**2} MB) exceeds the "
+                    f"configured output limit ({limit_mb} MB). "
+                    "Pick a lower quality and try again.")
+            skipped.append(f"{_res_label(res_h)}: {size // 1024**2} MB "
+                           f"is over the {limit_mb} MB limit")
+        else:
+            ready.append((res_h, path, size))
+    if not ready:
+        raise ValidationError("No output could be delivered: "
+                              + "; ".join(skipped))
 
     # ── 4. Upload ───────────────────────────────────────────────────────
     from bot.services.user_settings import value_of
     await rt.repo.transition(job.id, JobStatus.UPLOADING, stage="uploading")
-    out_media: MediaInfo | None = None
-    try:
-        out_media = await probe_media(str(output_path), ffprobe=cfg.ffprobe_path)
-    except ProbeError:
-        log.warning("Output probe failed for %s — uploading anyway", job.id)
-    thumbs = await make_thumbnails(
-        str(output_path), out_dir,
-        out_media.duration if out_media else (media.duration if media else 0.0),
-        media=out_media, ffmpeg=cfg.ffmpeg_path, cancel_token=token,
-    )
-    upload_started = time.monotonic()
+    upload_pref = value_of(settings or {}, "upload_as")
     upload_stages = panels.pipeline_stages("upload", with_subtitles=True)
 
-    async def _upl_progress(done: int, total: int) -> None:
-        await rt.repo.update_fields(job.id, progress=done / total * 100 if total else 0)
-        elapsed_ul = time.monotonic() - upload_started
-        speed = done / elapsed_ul if elapsed_ul > 1 else 0.0
-        await reporter.update(
-            panels.transfer_panel(
-                title="Uploading", icon="📤", filename=output_path.name,
-                done=done, total=total, speed=speed, elapsed=elapsed_ul,
-                source="Telegram 📲", stages=upload_stages, style=style,
-            ),
-            reply_markup=keyboards.cancel_only(job.id),
-        )
-
-    caption = build_caption(
-        original_name=job.input_name, out_path=output_path, media=out_media,
-        plan_summary=settings_line, encode_seconds=time.monotonic() - started,
-        template=str(o.get("caption_template", "")),
-    )
-    upload_pref = value_of(settings or {}, "upload_as")
-    async with rt.manager.upload_sem:
+    for idx, (res_h, output_path, out_size) in enumerate(ready, start=1):
         token.raise_if_cancelled()
-        await upload_file(
-            rt.client, job.chat_id, output_path,
-            media=out_media, caption=caption,
-            thumb=thumbs.thumb, cover=thumbs.cover,
-            as_video=should_send_as_video(
-                output_path, out_media,
-                str(o.get("upload_as") or upload_pref or "auto")),
-            progress_cb=_upl_progress,
-            cancelled=lambda: token.cancelled,
+        out_media: MediaInfo | None = None
+        try:
+            out_media = await probe_media(str(output_path),
+                                          ffprobe=cfg.ffprobe_path)
+        except ProbeError:
+            log.warning("Output probe failed for %s — uploading anyway", job.id)
+        thumbs = await make_thumbnails(
+            str(output_path), out_dir,
+            out_media.duration if out_media else (media.duration if media else 0.0),
+            media=out_media, ffmpeg=cfg.ffmpeg_path, cancel_token=token,
         )
+        upload_started = time.monotonic()
+        title = ("Uploading" if len(ready) == 1
+                 else f"Uploading {idx}/{len(ready)}")
+
+        async def _upl_progress(done: int, total: int, _p=output_path,
+                                _t=title, _u=upload_started) -> None:
+            await rt.repo.update_fields(
+                job.id, progress=done / total * 100 if total else 0)
+            elapsed_ul = time.monotonic() - _u
+            speed = done / elapsed_ul if elapsed_ul > 1 else 0.0
+            await reporter.update(
+                panels.transfer_panel(
+                    title=_t, icon="📤", filename=_p.name,
+                    done=done, total=total, speed=speed, elapsed=elapsed_ul,
+                    source="Telegram 📲", stages=upload_stages, style=style,
+                ),
+                reply_markup=keyboards.cancel_only(job.id),
+            )
+
+        caption = build_caption(
+            original_name=job.input_name, out_path=output_path,
+            media=out_media,
+            plan_summary=(_settings_line(job, res_h) if multi
+                          else settings_line),
+            encode_seconds=time.monotonic() - started,
+            template=str(o.get("caption_template", "")),
+        )
+        async with rt.manager.upload_sem:
+            token.raise_if_cancelled()
+            await upload_file(
+                rt.client, job.chat_id, output_path,
+                media=out_media, caption=caption,
+                thumb=thumbs.thumb, cover=thumbs.cover,
+                as_video=should_send_as_video(
+                    output_path, out_media,
+                    str(o.get("upload_as") or upload_pref or "auto")),
+                progress_cb=_upl_progress,
+                cancelled=lambda: token.cancelled,
+            )
 
     await rt.repo.transition(job.id, JobStatus.COMPLETED, stage="done")
-    await reporter.update(
-        panels.done_panel(filename=output_path.name, out_size=out_size,
-                          elapsed=time.monotonic() - started,
-                          settings_line=settings_line, job_id=job.id),
-        force=True,
-    )
+    shown = (ready[0][1].name if len(ready) == 1 else
+             f"{len(ready)} files · " + " + ".join(_res_label(r)
+                                                   for r, _, _ in ready))
+    done_text = panels.done_panel(
+        filename=shown, out_size=sum(sz for _, _, sz in ready),
+        elapsed=time.monotonic() - started,
+        settings_line=settings_line, job_id=job.id)
+    if skipped:
+        done_text += "\n⚠️ Skipped: " + "; ".join(skipped)
+    await reporter.update(done_text, force=True)
     await cleanup_job_dir(rt.repo, cfg.work_dir, job.id)
     await _maybe_delete_seedr_folder(rt, job.id)
