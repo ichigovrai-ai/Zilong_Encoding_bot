@@ -143,8 +143,14 @@ def render(job: Job) -> tuple[str, Any]:
         return header + "Burn the subtitle in, or mux it as a separate track?", \
             keyboards.subtitle_disposition_menu(jid)
     if step == "fcq":
-        return header + "☁️ FreeConvert — choose the output quality:", \
-            keyboards.fc_quality_menu(jid)
+        sel = job.options.get("fc_res_sel") or []
+        hint = (f"{len(sel)} selected — tap Done to continue."
+                if sel else
+                f"Tap one or more (max {keyboards.FC_MAX_QUALITIES}), "
+                "then Done.")
+        return header + ("☁️ FreeConvert — choose the output quality:\n"
+                         f"<i>{hint}</i>"), \
+            keyboards.fc_quality_menu(jid, sel)
     if step == "fcy":
         return header + "Choose the subtitle style:", \
             keyboards.fc_style_menu(jid)
@@ -278,9 +284,24 @@ async def handle_selection(
                 o["step"] = "subdisp"
 
     elif verb == "fq":
-        if arg in {a for a, _ in keyboards.FC_QUALITIES}:
-            o["fc_res"] = int(arg)
-            advance(job)
+        known = {a for a, _ in keyboards.FC_QUALITIES}
+        sel: list[str] = [str(x) for x in (o.get("fc_res_sel") or [])]
+        if arg == "done":
+            if not sel:
+                alert = "Pick at least one quality first."
+            else:
+                o["fc_res_list"] = [int(x) for x in sel]
+                o["fc_res"] = int(sel[0])        # primary / backwards-compat
+                advance(job)
+        elif arg in known:
+            if arg in sel:
+                sel.remove(arg)                  # tap again → untick
+            elif len(sel) >= keyboards.FC_MAX_QUALITIES:
+                alert = (f"Maximum {keyboards.FC_MAX_QUALITIES} qualities "
+                         "per run.")
+            else:
+                sel.append(arg)
+            o["fc_res_sel"] = sel
         else:
             alert = "Unknown quality."
 
@@ -303,10 +324,15 @@ async def handle_selection(
     elif verb == "bk":
         if o.get("fc_mag") and not o.get("history"):
             # Back from the first FC step → return to the episode picker.
-            for k in ("fc_mag", "step", "main_step", "fc_res", "fc_style"):
+            for k in ("fc_mag", "step", "main_step", "fc_res", "fc_style",
+                      "fc_res_sel", "fc_res_list"):
                 o.pop(k, None)
             await _save(rt, job)
             text, kb = render_episodes(rt, job)
+            return text, kb, None
+        if not o.get("history") and job.kind != JobKind.SEEDR_HARDSUB:
+            # Back from the FIRST step (or from the extract menu) → main menu.
+            text, kb = await back_to_main_menu(rt, job)
             return text, kb, None
         go_back(job)
     await _save(rt, job)
@@ -315,6 +341,30 @@ async def handle_selection(
         return text, kb, alert
     text, kb = render(job)
     return text, kb, None
+
+
+# Wizard selections cleared when the user backs out to the main menu, so the
+# next action doesn't inherit them in its header.
+_WIZARD_KEYS = ("step", "history", "main_step", "await", "resolution",
+                "allow_upscale", "codec", "quality", "crf", "target_size_mb",
+                "video_bitrate", "audio", "subtitle_mode", "subtitle_source",
+                "subtitle_stream", "engine", "fc_res", "fc_style", "fc_mag",
+                "fc_res_sel", "fc_res_list")
+
+
+async def back_to_main_menu(rt: Runtime, job: Job) -> tuple[str, Any]:
+    """Restore the 'Choose an action' menu shown when the file/link arrived."""
+    o = job.options
+    for k in _WIZARD_KEYS:
+        o.pop(k, None)
+    job.kind = JobKind.ENCODE
+    await rt.repo.update_fields(job.id, kind=JobKind.ENCODE, options=o)
+    text = str(o.get("menu_text") or "") or (
+        f"<b>🎞 Video received</b>\n\n<code>{job.input_name}</code>"
+        "\n\nChoose an action:")
+    fc = rt.config.fc_enabled and job.input_type == InputType.URL
+    return text, keyboards.action_menu(job.id, has_embedded_subs(job), fc=fc,
+                                       dl=job.input_type == InputType.URL)
 
 
 async def after_subtitle_upload(rt: Runtime, job: Job) -> tuple[str, Any]:
@@ -427,7 +477,11 @@ async def spawn_seedr_children(rt: Runtime, parent: Job,
     if fc:
         from bot.services.house_style import STYLE_PRESET_LABELS
         po = parent.options
-        _q = dict(keyboards.FC_QUALITIES).get(str(po.get("fc_res", 0)), "Original quality")
+        from bot.jobs.fc_pipeline import fc_res_list
+        _qs = fc_res_list(po)
+        _q = (dict(keyboards.FC_QUALITIES).get(str(_qs[0]), "Original quality")
+              if len(_qs) == 1 else
+              " + ".join("Original" if r == 0 else f"{r}p" for r in _qs))
         _st = STYLE_PRESET_LABELS.get(str(po.get("fc_style", "a")), "Style A")
         summary = f"☁️ FreeConvert · 🖥 {_q} · 🎨 {_st} · 💬 FR subtitle extracted automatically"
 
@@ -470,6 +524,7 @@ async def spawn_seedr_children(rt: Runtime, parent: Job,
             options=({
                 "engine": "fc",
                 "fc_res": int(parent.options.get("fc_res", 0)),
+                "fc_res_list": list(fc_res_list(parent.options)),
                 "fc_style": str(parent.options.get("fc_style", "a")),
                 "subtitle_mode": sub_mode,
                 "subtitle_source": sub_source,
@@ -500,6 +555,53 @@ async def spawn_seedr_children(rt: Runtime, parent: Job,
         await rt.manager.enqueue(child.id)
         count += 1
     return count, summary
+
+
+async def spawn_seedr_tasks(rt: Runtime, parent: Job, kind: str,
+                            options: dict[str, Any]) -> int:
+    """One child job per selected Seedr episode for a non-encode task
+    (stream extraction or plain download). Returns how many were queued."""
+    s = parent.seedr
+    matches: list[dict] = s.get("matches") or []
+    selected: list[int] = s.get("selected") or []
+    count = 0
+    for idx in selected:
+        if not 0 <= idx < len(matches):
+            continue
+        m = matches[idx]
+        child = Job(
+            id=new_job_id(),
+            user_id=parent.user_id,
+            chat_id=parent.chat_id,
+            kind=kind,
+            input_type=InputType.SEEDR_FILE,
+            input_ref=str(m["video_id"]),
+            input_name=str(m.get("video_label") or "episode.mkv"),
+            input_size=int(m.get("video_size") or 0),
+            options=dict(options),
+            seedr={
+                "account": s.get("account", ""),
+                "folder_id": s.get("folder_id"),
+                "parent": parent.id,
+            },
+        )
+        work = create_job_dirs(rt.config.work_dir, child.user_id, child.id)
+        child.work_dir = str(work)
+        try:
+            status_msg = await rt.client.send_message(
+                parent.chat_id,
+                f"📥 Queued: <code>{child.input_name[:60]}</code>",
+            )
+            child.status_msg_id = status_msg.id
+        except Exception:  # noqa: BLE001 — job must exist even if msg fails
+            log.exception("Could not send child status message")
+        await rt.repo.insert(child)
+        await rt.manager.enqueue(child.id)
+        count += 1
+    if count:
+        await rt.repo.transition(parent.id, JobStatus.COMPLETED,
+                                 detail=f"spawned {count} {kind} job(s)")
+    return count
 
 
 def render_episodes(rt: Runtime, job: Job) -> tuple[str, Any]:
