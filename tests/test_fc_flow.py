@@ -113,7 +113,11 @@ async def test_direct_link_flow(rt):
     assert job.options["engine"] == "fc"
 
     _, _, alert = await wizard.handle_selection(rt, job, "fq", "720")
+    assert alert is None and job.options["fc_res_sel"] == ["720"]
+    assert job.options["step"] == "fcq"          # ticking doesn't advance
+    _, _, alert = await wizard.handle_selection(rt, job, "fq", "done")
     assert alert is None and job.options["fc_res"] == 720
+    assert job.options["fc_res_list"] == [720]
     assert job.options["step"] == "fcy"
 
     text, _, alert = await wizard.handle_selection(rt, job, "fy", "b")
@@ -134,6 +138,7 @@ async def test_original_quality_and_orig_style_accepted(rt):
     await rt.repo.insert(job)
     await wizard.enter_kind(rt, job, JobKind.FC_HARDSUB)
     await wizard.handle_selection(rt, job, "fq", "0")
+    await wizard.handle_selection(rt, job, "fq", "done")
     assert job.options["fc_res"] == 0
     await wizard.handle_selection(rt, job, "fy", "orig")
     assert job.options["fc_style"] == "orig"
@@ -146,6 +151,7 @@ async def test_bad_args_are_rejected(rt):
     _, _, alert = await wizard.handle_selection(rt, job, "fq", "999")
     assert alert and job.options["step"] == "fcq"
     await wizard.handle_selection(rt, job, "fq", "480")
+    await wizard.handle_selection(rt, job, "fq", "done")
     _, _, alert = await wizard.handle_selection(rt, job, "fy", "z")
     assert alert and job.options["step"] == "fcy"
 
@@ -155,6 +161,7 @@ async def test_back_goes_to_previous_step(rt):
     await rt.repo.insert(job)
     await wizard.enter_kind(rt, job, JobKind.FC_HARDSUB)
     await wizard.handle_selection(rt, job, "fq", "480")
+    await wizard.handle_selection(rt, job, "fq", "done")
     await wizard.handle_selection(rt, job, "bk", "")
     assert job.options["step"] == "fcq"
 
@@ -188,6 +195,7 @@ async def test_magnet_flow_spawns_fc_children(rt):
     text, _ = await wizard.enter_fc_magnet(rt, parent)
     assert parent.options["step"] == "fcq"
     await wizard.handle_selection(rt, parent, "fq", "480")
+    await wizard.handle_selection(rt, parent, "fq", "done")
     assert parent.options["step"] == "fcy"
     text, kb, alert = await wizard.handle_selection(rt, parent, "fy", "c")
 
