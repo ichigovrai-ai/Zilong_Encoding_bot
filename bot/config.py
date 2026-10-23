@@ -92,6 +92,12 @@ class Config:
     # first key that still has conversion minutes left (see freeconvert.py).
     fc_api_keys: tuple[str, ...] = ()
 
+    # Dump channels: every uploaded file is also copied (or forwarded) to these
+    # chats. Negative ids such as -1001234567890; the bot must be an admin.
+    dump_channels: tuple[int, ...] = ()
+    dump_mode: str = "copy"          # "copy" (no forward header) | "forward"
+    dump_all_users: bool = False     # False = only the owner's uploads
+
     # UX
     progress_update_interval: float = 4.0
 
@@ -206,6 +212,14 @@ class Config:
             if shutil.which(binary) is None and not Path(binary).is_file():
                 errors.append(f"{label}: executable not found: {binary!r}")
 
+        dump_channels = _split_ids(opt("DUMP_CHANNELS"))
+        if any(c == 0 or c > 0 for c in dump_channels):
+            errors.append("DUMP_CHANNELS: use channel ids like -1001234567890 "
+                          "(negative numbers)")
+        dump_mode = opt("DUMP_MODE", "copy").lower()
+        if dump_mode not in ("copy", "forward"):
+            errors.append("DUMP_MODE must be 'copy' or 'forward'")
+
         if errors:
             raise ConfigError(
                 "Configuration invalid:\n  - " + "\n  - ".join(errors)
@@ -256,6 +270,9 @@ class Config:
             seedr_poll_interval=num("SEEDR_POLL_INTERVAL", 10.0, 3.0, 120.0),
             seedr_timeout_hours=num("SEEDR_TIMEOUT_HOURS", 4.0, 0.1, 24.0),
             fc_api_keys=fc_api_keys,
+            dump_channels=dump_channels,
+            dump_mode=dump_mode,
+            dump_all_users=opt("DUMP_ALL_USERS", "0").lower() in ("1", "true", "yes"),
             progress_update_interval=num("PROGRESS_UPDATE_INTERVAL", 4.0, 2.0, 60.0),
             secrets=secrets,
         )
