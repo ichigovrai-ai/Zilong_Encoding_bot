@@ -37,6 +37,10 @@ async def cmd_help(_: Client, message: Message) -> None:
             "<code>/revoke &lt;id|@user&gt;</code> — remove access\n"
             "<code>/subs</code> — list active subscribers\n"
             "<i>Set SUBSCRIPTION_MODE=1 to restrict the bot to paid users.</i>"
+            "\n\n📦 <b>OWNER — DUMP CHANNELS</b>\n"
+            "<code>/adddump &lt;id|@channel&gt;</code> — copy every upload there\n"
+            "<code>/removedump &lt;id|@channel&gt;</code> — stop copying\n"
+            "<code>/dumps</code> — list the dump channels"
         )
     await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
 
