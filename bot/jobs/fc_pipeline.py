@@ -26,6 +26,7 @@ from bot.jobs.states import JobStatus
 from bot.runtime import Runtime
 from bot.services import freeconvert
 from bot.services.codec_profiles import RESIZE_CHOICES
+from bot.services.dump import send_to_dumps
 from bot.services.extraction import extract_text_subtitle
 from bot.services.ffprobe import MediaInfo, ProbeError, probe_media
 from bot.services.house_style import NO_CHANGE_KEY, STYLE_PRESET_LABELS
@@ -426,7 +427,7 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
         )
         async with rt.manager.upload_sem:
             token.raise_if_cancelled()
-            await upload_file(
+            sent = await upload_file(
                 rt.client, job.chat_id, output_path,
                 media=out_media, caption=caption,
                 thumb=thumbs.thumb, cover=thumbs.cover,
@@ -436,6 +437,7 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
                 progress_cb=_upl_progress,
                 cancelled=lambda: token.cancelled,
             )
+        await send_to_dumps(rt.client, cfg, job.user_id, sent, db=rt.db)
 
     await rt.repo.transition(job.id, JobStatus.COMPLETED, stage="done")
     shown = (ready[0][1].name if len(ready) == 1 else
