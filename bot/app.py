@@ -111,6 +111,9 @@ async def run() -> None:
                 log.warning("Seedr account %s check failed: %s", user[:20], exc)
         log.info("Seedr accounts OK: %d/%d", ok_count, len(cfg.seedr_accounts))
 
+    from bot.services.dump import check_dump_channels
+    await check_dump_channels(client, cfg, db)
+
     await manager.start()
     log.info("Job manager started (encodes=%d, downloads=%d)",
              cfg.max_concurrent_encodes, cfg.max_concurrent_downloads)
