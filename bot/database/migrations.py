@@ -72,6 +72,15 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_subscriptions_expiry ON subscriptions(expires_at);
     """,
+    # v3 — dump channels managed with /adddump and /removedump
+    """
+    CREATE TABLE dump_channels (
+        chat_id   INTEGER PRIMARY KEY,
+        title     TEXT NOT NULL DEFAULT '',
+        added_by  INTEGER NOT NULL,
+        added_at  REAL NOT NULL
+    );
+    """,
 ]
 
 
