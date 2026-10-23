@@ -17,6 +17,7 @@ from bot.runtime import Runtime, get_runtime
 from bot.services.download import (
     DownloadError, download_telegram_media, download_url,
 )
+from bot.services.dump import send_to_dumps
 from bot.services.encoding import EncodePlan
 from bot.services.extraction import ExtractionError, extract_text_subtitle
 from bot.services.ffmpeg import (
@@ -323,7 +324,7 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
 
     async with rt.manager.upload_sem:
         token.raise_if_cancelled()
-        await upload_file(
+        sent = await upload_file(
             rt.client, job.chat_id, output_path,
             media=out_media, caption=caption,
             thumb=thumbs.thumb, cover=thumbs.cover,
@@ -334,6 +335,7 @@ async def _run_pipeline(rt: Runtime, job: Job, token: CancelToken,
             progress_cb=_upl_progress,
             cancelled=lambda: token.cancelled,
         )
+    await send_to_dumps(rt.client, cfg, job.user_id, sent, db=rt.db)
 
     await rt.repo.transition(job.id, JobStatus.COMPLETED, stage="done")
     await reporter.update(
@@ -675,7 +677,7 @@ async def _run_download(rt: Runtime, job: Job, input_path: Path, work: Path,
 
     async with rt.manager.upload_sem:
         token.raise_if_cancelled()
-        await upload_file(
+        sent = await upload_file(
             rt.client, job.chat_id, final,
             media=media, caption=f"📥 {html.escape(final.name)}",
             thumb=thumbs.thumb if thumbs else None,
@@ -687,6 +689,7 @@ async def _run_download(rt: Runtime, job: Job, input_path: Path, work: Path,
             progress_cb=_upl_progress,
             cancelled=lambda: token.cancelled,
         )
+    await send_to_dumps(rt.client, cfg, job.user_id, sent, db=rt.db)
 
     await rt.repo.transition(job.id, JobStatus.COMPLETED, stage="done")
     await reporter.update(
