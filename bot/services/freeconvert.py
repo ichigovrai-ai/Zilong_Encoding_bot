@@ -581,6 +581,21 @@ def _create_hardsub_multi_payload(
     return {"tasks": tasks}
 
 
+def _task_problem(job: dict, quality: str) -> str:
+    """Why a quality produced no file: status/message of its FreeConvert tasks."""
+    parts: list[str] = []
+    for name in (f"convert_{quality}", f"export_{quality}"):
+        task = _find_task(job, name)
+        if not task:
+            parts.append(f"{name} missing in FreeConvert's answer")
+            continue
+        status = str(task.get("status") or "?")
+        msg = str(task.get("message") or task.get("code") or "").strip()
+        if status != "completed" or msg:
+            parts.append(f"{name} {status}" + (f" ({msg[:100]})" if msg else ""))
+    return "; ".join(parts) or "no export URL returned"
+
+
 async def hardsub_remote_url_multi(
     api_keys: str,
     video_url: str,
@@ -594,6 +609,8 @@ async def hardsub_remote_url_multi(
     codec: Optional[str] = None,
     process_cb: ProgressCB = None,
     download_cb: ProgressCB = None,
+    failures: Optional[dict[str, str]] = None,
+    url_cb: Optional[Callable[[str, str], Awaitable[None]]] = None,
 ) -> dict[str, str]:
     """Hardsub en PLUSIEURS qualités avec un seul job FreeConvert.
 
@@ -652,21 +669,58 @@ async def hardsub_remote_url_multi(
     job_id = job.get("id", "?")
     job = await _wait_for_job(api_key, job_id, process_cb)
 
+    def _cb_for(quality: str):
+        if not download_cb:
+            return None
+
+        async def _quality_download_cb(pct: float, msg: str) -> None:
+            await download_cb(pct, f"{quality} — {msg}")
+        return _quality_download_cb
+
     results: dict[str, str] = {}
+    missing: dict[str, str] = {}
+    urls: dict[str, str] = {}
     for quality in qualities:
         export_task = _find_task(job, f"export_{quality}")
         url = _task_export_url(export_task) if export_task else ""
         if not url:
-            log.warning("⚠️ FreeConvert : pas d'URL d'export pour la qualité %s", quality)
+            missing[quality] = _task_problem(job, quality)
+            log.warning("⚠️ FreeConvert : pas de fichier pour la qualité %s — %s",
+                        quality, missing[quality])
             continue
+        urls[quality] = url
 
-        async def _quality_download_cb(pct: float, msg: str, _quality: str = quality) -> None:
-            if download_cb:
-                await download_cb(pct, f"{_quality} — {msg}")
+    # Every link goes out as soon as the cloud encode is done — before any
+    # download starts — so it's available even if a download then fails.
+    if url_cb:
+        for quality, url in urls.items():
+            try:
+                await url_cb(quality, url)
+            except Exception as exc:
+                log.warning("url_cb a échoué (non bloquant): %s", exc)
 
-        results[quality] = await _download_file(
-            url, output_paths[quality], _quality_download_cb if download_cb else None
-        )
+    for quality, url in urls.items():
+        results[quality] = await _download_file(url, output_paths[quality],
+                                                _cb_for(quality))
+
+    # A quality the grouped job didn't deliver is retried on its own (one
+    # FreeConvert job per missing quality) before giving up on it.
+    for quality, reason in missing.items():
+        log.info("🔁 FreeConvert : nouvel essai de %s en job séparé", quality)
+        try:
+            results[quality] = await hardsub_remote_url(
+                api_keys, video_url, source_name, subtitle_path, dest_dir,
+                quality_profile=quality_profile, resize=qualities[quality],
+                style_key=style_key, codec=codec,
+                process_cb=process_cb, download_cb=_cb_for(quality),
+                url_cb=(None if url_cb is None else
+                        (lambda u, _q=quality: url_cb(_q, u))),
+            )
+        except Exception as exc:  # noqa: BLE001 — CancelledError isn't an Exception
+            log.warning("⚠️ FreeConvert : l'essai séparé de %s a échoué: %s",
+                        quality, exc)
+            if failures is not None:
+                failures[quality] = f"{reason}; retry failed: {str(exc)[:120]}"
     if not results:
         raise RuntimeError("FreeConvert a terminé sans aucun fichier exporté.")
     return results
