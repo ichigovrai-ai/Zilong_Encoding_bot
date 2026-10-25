@@ -36,6 +36,15 @@ SEEDR_PROXY    = ""  # @param {type:"string"}
 FC_API_KEYS = ""  # @param {type:"string"}
 
 # @markdown ---
+# @markdown ### 📦 Dump channels
+# @markdown Every uploaded file is also copied to these channels. The bot must
+# @markdown be an ADMIN there. Ids like -1001234567890, separated by spaces/commas.
+DUMP_CHANNELS  = ""      # @param {type:"string"}
+DUMP_MODE      = "copy"  # @param ["copy", "forward"]
+# @markdown Off = only YOUR uploads are dumped (other users' files stay private).
+DUMP_ALL_USERS = False   # @param {type:"boolean"}
+
+# @markdown ---
 # @markdown ### ⚙️ Encoding & limits
 PREFERRED_SUB_LANG       = ""        # @param {type:"string"}
 DEFAULT_PRESET           = "veryfast" # @param ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"]
@@ -277,6 +286,14 @@ def _stop_previous_bot() -> None:
     PID_FILE.unlink(missing_ok=True)
 
 
+def _normalize_proxy(value: str) -> str:
+    """'host:port' or 'user:pass@host:port' -> 'http://…' (the bot only accepts http/https)."""
+    value = value.strip()
+    if value and "://" not in value:
+        return "http://" + value
+    return value
+
+
 def _collect_env() -> dict[str, str]:
     api_id = _secret("API_ID", API_ID)
     owner_id = _secret("OWNER_ID", OWNER_ID)
@@ -295,8 +312,11 @@ def _collect_env() -> dict[str, str]:
         "SUBSCRIPTION_MODE": _secret("SUBSCRIPTION_MODE", "0"),
         "SEEDR_USERNAME": _secret("SEEDR_USERNAME", SEEDR_USERNAME),
         "SEEDR_PASSWORD": _secret("SEEDR_PASSWORD", SEEDR_PASSWORD),
-        "SEEDR_PROXY": _secret("SEEDR_PROXY", SEEDR_PROXY),
+        "SEEDR_PROXY": _normalize_proxy(_secret("SEEDR_PROXY", SEEDR_PROXY)),
         "FC_API_KEYS": _secret("FC_API_KEYS", FC_API_KEYS),
+        "DUMP_CHANNELS": _secret("DUMP_CHANNELS", DUMP_CHANNELS),
+        "DUMP_MODE": _secret("DUMP_MODE", DUMP_MODE),
+        "DUMP_ALL_USERS": "1" if (DUMP_ALL_USERS or _secret("DUMP_ALL_USERS") in ("1", "true", "True")) else "0",
         "PREFERRED_SUB_LANG": _secret("PREFERRED_SUB_LANG", PREFERRED_SUB_LANG),
         "DEFAULT_PRESET": _secret("DEFAULT_PRESET", DEFAULT_PRESET),
         "DEFAULT_CRF": _secret_int("DEFAULT_CRF", DEFAULT_CRF, 0, 51),
@@ -339,7 +359,13 @@ def _validate(env: dict[str, str]) -> None:
     if bool(seedr_users) != bool(seedr_pwds) or len(seedr_users) != len(seedr_pwds):
         problems.append("SEEDR_USERNAME / SEEDR_PASSWORD must be set together, same count")
     if env["SEEDR_PROXY"] and not env["SEEDR_PROXY"].startswith(("http://", "https://")):
-        problems.append("SEEDR_PROXY must be an http(s):// URL (SOCKS is not supported)")
+        scheme = env["SEEDR_PROXY"].split("://", 1)[0]
+        problems.append(f"SEEDR_PROXY uses '{scheme}://' but the bot only supports http(s):// "
+                        "proxies. Use an HTTP proxy, or empty the SEEDR_PROXY secret/field.")
+    for ch in env["DUMP_CHANNELS"].replace(",", " ").split():
+        if not ch.lstrip("-").isdigit() or not ch.startswith("-"):
+            problems.append(f"DUMP_CHANNELS: '{ch}' is not a channel id "
+                            "(expected something like -1001234567890)")
     if problems:
         for p in problems:
             print(f"  ❌ {p}")
@@ -384,6 +410,10 @@ def _print_summary(env: dict[str, str]) -> None:
     _log("OK" if n_seedr else "INFO", f"Seedr accounts: {n_seedr}")
     _log("OK" if n_fc else "INFO", f"FreeConvert keys: {n_fc}"
          + ("" if n_fc else " (☁️ FC hardsub flows disabled)"))
+    n_dump = len(env["DUMP_CHANNELS"].replace(",", " ").split())
+    if n_dump:
+        scope = "everyone's uploads" if env["DUMP_ALL_USERS"] == "1" else "your uploads only"
+        _log("OK", f"Dump channels: {n_dump} ({env['DUMP_MODE']}, {scope})")
     _log("OK", f"Data dir: {env['SESSION_DIR']}")
     if n_seedr and not env["SEEDR_PROXY"]:
         _log("WARN", "SEEDR_PROXY is empty. If magnet-adds are refused, Seedr is "
