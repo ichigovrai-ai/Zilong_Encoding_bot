@@ -230,27 +230,68 @@ def _detailed_progress(job: dict) -> tuple[float, str]:
     return overall_pct, msg
 
 
+_FINAL_STATES = {"completed", "failed", "error", "cancelled", "canceled"}
+_DEAD_STATES = {"failed", "error", "cancelled", "canceled"}
+
+
+def _quality_settled(job: dict, quality: str) -> bool:
+    """True once a quality can no longer change: its export has a link / has
+    ended, or its conversion (or the shared import) failed."""
+    export = _find_task(job, f"export_{quality}")
+    if export and (_task_export_url(export)
+                   or str(export.get("status") or "").lower() in _FINAL_STATES):
+        return True
+    for name in (f"convert_{quality}", "import-video"):
+        task = _find_task(job, name)
+        if task and str(task.get("status") or "").lower() in _DEAD_STATES:
+            return True
+    return False
+
+
+def _multi_ready(job: dict, qualities: list[str]) -> bool:
+    """A multi-quality job is done when EVERY quality is settled. FreeConvert
+    can report the whole job "completed" while another quality is still being
+    compressed, so the job status alone can't be trusted here."""
+    if all(_quality_settled(job, q) for q in qualities):
+        return True
+    if str(job.get("status") or "").lower() in {"failed", "error"}:
+        # Failed job: if nothing is still running, nothing more will arrive.
+        return not any(str(t.get("status") or "").lower() in {"processing", "running"}
+                       for t in job.get("tasks") or [])
+    return False
+
+
 async def _wait_for_job(
     api_key: str,
     job_id: str,
     progress_cb: ProgressCB = None,
     timeout_s: int = 3600,
+    ready: Optional[Callable[[dict], bool]] = None,
 ) -> dict:
     """Attend la fin du job FreeConvert. Si la tâche du bot est annulée
     pendant l'attente (bouton Cancel), le job est aussi supprimé côté
     FreeConvert (best-effort, voir _delete_job) avant de repropager
-    l'annulation."""
+    l'annulation.
+
+    `ready` (optionnel) : prédicat « tout est vraiment fini » pour les jobs
+    à plusieurs sorties. Avec lui, un job « completed » dont une sortie est
+    encore en cours continue d'être attendu, et un job « failed » est rendu
+    à l'appelant (qui lit tâche par tâche) au lieu de lever tout de suite."""
     deadline = time.time() + timeout_s
     try:
         while time.time() < deadline:
             job = await _job_status(api_key, job_id)
             status = str(job.get("status") or "")
-            if status == "completed":
+            done = ready(job) if ready else True
+            if status == "completed" and done:
                 if progress_cb:
                     await progress_cb(100.0, "Import 100% · Compression 100%")
                 return job
             if status in {"failed", "error"}:
-                raise RuntimeError(_job_failure_reason(job))
+                if ready is None:
+                    raise RuntimeError(_job_failure_reason(job))
+                if done:
+                    return job
 
             pct, detail_msg = _detailed_progress(job)
             if progress_cb:
@@ -667,7 +708,9 @@ async def hardsub_remote_url_multi(
 
     job = await _post_job(api_key, payload)
     job_id = job.get("id", "?")
-    job = await _wait_for_job(api_key, job_id, process_cb)
+    quality_names = list(qualities)
+    job = await _wait_for_job(api_key, job_id, process_cb,
+                              ready=lambda j: _multi_ready(j, quality_names))
 
     def _cb_for(quality: str):
         if not download_cb:
@@ -722,7 +765,8 @@ async def hardsub_remote_url_multi(
             if failures is not None:
                 failures[quality] = f"{reason}; retry failed: {str(exc)[:120]}"
     if not results:
-        raise RuntimeError("FreeConvert a terminé sans aucun fichier exporté.")
+        raise RuntimeError("FreeConvert a terminé sans aucun fichier exporté: "
+                           + _job_failure_reason(job))
     return results
 
 
