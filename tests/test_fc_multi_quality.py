@@ -16,6 +16,7 @@ from bot.jobs.repository import JobRepository
 from bot.jobs.states import JobStatus
 from bot.runtime import Runtime
 from bot.services import freeconvert
+_real_wait = freeconvert._wait_for_job
 from bot.ui import keyboards
 from bot.ui.callbacks import parse
 from bot.utils.subprocesses import CancelToken
@@ -258,7 +259,7 @@ def fc_net(monkeypatch, tmp_path):
     async def _key(keys): return "k"
     async def _codec(api_key, codec, cfg, fmt): return "h264", {}, 128
     async def _post(api_key, payload): return {"id": "job1"}
-    async def _wait(api_key, job_id, cb): return state.job
+    async def _wait(api_key, job_id, cb, **kw): return state.job
 
     async def _download(url, dest, cb=None):
         state.events.append(("download", url))
@@ -476,3 +477,126 @@ async def test_a_failing_link_message_never_fails_the_job(env):
                                            _Chat(fail=True))
     assert len(env.calls["uploads"]) == 2
     assert (await env.rt.repo.get(job.id)).status == JobStatus.COMPLETED
+
+
+# ── FreeConvert says "completed" while a quality is still compressing ─────
+def _task(name, status, url=None, message=""):
+    t = {"name": name, "status": status, "result": {}}
+    if url:
+        t["result"] = {"url": url}
+    if message:
+        t["message"] = message
+    return t
+
+
+def _job(status, *tasks):
+    return {"id": "job1", "status": status, "tasks": list(tasks)}
+
+
+class _Polls:
+    """Feeds _wait_for_job a scripted sequence of job snapshots."""
+    def __init__(self, *snapshots):
+        self.snapshots = list(snapshots)
+        self.calls = 0
+
+    async def __call__(self, api_key, job_id):
+        self.calls += 1
+        return self.snapshots.pop(0) if len(self.snapshots) > 1 else self.snapshots[0]
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    async def _s(_):
+        return None
+    monkeypatch.setattr(freeconvert.asyncio, "sleep", _s)
+
+
+async def test_wait_keeps_polling_while_another_quality_still_compresses(
+        monkeypatch, no_sleep):
+    # The exact situation from the logs: job "completed", but orig still running.
+    early = _job("completed",
+                 _task("import-video", "completed"),
+                 _task("convert_360p", "completed"),
+                 _task("export_360p", "completed", "https://fc/360.mp4"),
+                 _task("convert_orig", "processing"),
+                 _task("export_orig", "created"))
+    final = _job("completed",
+                 _task("import-video", "completed"),
+                 _task("convert_360p", "completed"),
+                 _task("export_360p", "completed", "https://fc/360.mp4"),
+                 _task("convert_orig", "completed"),
+                 _task("export_orig", "completed", "https://fc/orig.mp4"))
+    polls = _Polls(early, early, final)
+    monkeypatch.setattr(freeconvert, "_job_status", polls)
+    job = await freeconvert._wait_for_job(
+        "k", "job1",
+        ready=lambda j: freeconvert._multi_ready(j, ["360p", "orig"]))
+    assert polls.calls == 3                               # waited, didn't give up
+    assert freeconvert._task_export_url(
+        freeconvert._find_task(job, "export_orig")) == "https://fc/orig.mp4"
+
+
+async def test_wait_without_predicate_is_unchanged(monkeypatch, no_sleep):
+    done = _job("completed", _task("export", "completed", "https://fc/x.mp4"))
+    monkeypatch.setattr(freeconvert, "_job_status", _Polls(done))
+    assert (await freeconvert._wait_for_job("k", "j")) is done
+    monkeypatch.setattr(freeconvert, "_job_status",
+                        _Polls(_job("failed", _task("hardsub", "failed", message="boom"))))
+    with pytest.raises(RuntimeError, match="boom"):
+        await freeconvert._wait_for_job("k", "j")
+
+
+async def test_failed_job_still_returns_the_quality_that_worked(
+        monkeypatch, no_sleep):
+    failed = _job("failed",
+                  _task("import-video", "completed"),
+                  _task("convert_360p", "completed"),
+                  _task("export_360p", "completed", "https://fc/360.mp4"),
+                  _task("convert_orig", "failed", message="Out of minutes"),
+                  _task("export_orig", "created"))
+    monkeypatch.setattr(freeconvert, "_job_status", _Polls(failed))
+    job = await freeconvert._wait_for_job(
+        "k", "j", ready=lambda j: freeconvert._multi_ready(j, ["360p", "orig"]))
+    assert job is failed
+    assert "Out of minutes" in freeconvert._task_problem(job, "orig")
+
+
+async def test_failed_import_does_not_wait_for_the_full_timeout(
+        monkeypatch, no_sleep):
+    dead = _job("failed",
+                _task("import-video", "failed", message="bad url"),
+                _task("convert_360p", "waiting"),
+                _task("export_360p", "created"))
+    polls = _Polls(dead)
+    monkeypatch.setattr(freeconvert, "_job_status", polls)
+    await freeconvert._wait_for_job(
+        "k", "j", ready=lambda j: freeconvert._multi_ready(j, ["360p"]))
+    assert polls.calls == 1
+
+
+async def test_multi_run_waits_for_both_qualities_and_never_duplicates_work(
+        fc_net, monkeypatch, no_sleep):
+    early = _job("completed",
+                 _task("convert_360p", "completed"),
+                 _task("export_360p", "completed", "https://fc/360p.mp4"),
+                 _task("convert_720p", "processing"),
+                 _task("export_720p", "created"))
+    polls = _Polls(early, _fc_job_response())             # 720p lands on 2nd poll
+    monkeypatch.setattr(freeconvert, "_job_status", polls)
+    monkeypatch.setattr(freeconvert, "_wait_for_job", _real_wait)   # undo fixture fake
+    out = await _call(fc_net)
+    assert set(out) == {"360p", "720p"}
+    assert polls.calls == 2
+    assert fc_net.single_calls == []                      # no useless re-run
+
+
+async def test_every_quality_failed_error_names_the_reason(
+        fc_net, monkeypatch, no_sleep):
+    dead = _job("failed", _task("import-video", "failed", message="bad url"),
+                _task("convert_360p", "waiting"), _task("export_360p", "created"),
+                _task("convert_720p", "waiting"), _task("export_720p", "created"))
+    monkeypatch.setattr(freeconvert, "_job_status", _Polls(dead))
+    monkeypatch.setattr(freeconvert, "_wait_for_job", _real_wait)
+    fc_net.single_error = RuntimeError("still no")
+    with pytest.raises(RuntimeError, match="bad url"):
+        await _call(fc_net)
