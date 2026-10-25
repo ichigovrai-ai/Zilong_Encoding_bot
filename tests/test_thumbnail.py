@@ -160,3 +160,83 @@ async def test_real_ffmpeg_frames_differ_between_calls(tmp_path: Path):
         assert ts.cover and ts.thumb
         covers.append(Path(ts.cover).read_bytes())
     assert len(set(covers)) >= 2          # the testsrc2 counter differs per moment
+
+
+# ── the HD cover must survive a video that is shorter than its duration ───
+from bot.services.thumbnail import seek_chain
+
+
+def test_seek_chain_starts_random_then_gets_safer():
+    chain = seek_chain(1532.5, rng=random.Random(1))
+    assert chain[0] == pick_seek(1532.5, random.Random(1))
+    assert chain[1:] == [fixed_seek(1532.5), round(1532.5 * 0.05, 2), 3.0, 0.0]
+    assert len(set(chain)) == len(chain)
+
+
+def test_seek_chain_without_random_and_for_short_or_unknown_duration():
+    assert seek_chain(1000.0, randomize=False)[0] == 120.0
+    assert 0.0 in seek_chain(5.0) and seek_chain(5.0)[0] == 0.0   # short: start first
+    assert 0.0 in seek_chain(1532.5) and seek_chain(1532.5)[-1] == 0.0
+    assert seek_chain(0.0)[0] == 0.0                              # unknown length
+    for dur in (0.0, 5.0, 20.0, 1532.5):
+        for s in seek_chain(dur, rng=random.Random(4)):
+            assert s >= 0 and (dur == 0 or s == 0 or s < dur)
+
+
+async def test_chain_keeps_going_until_a_position_works(tmp_path, monkeypatch):
+    class _FailFirst(_FakeRun):
+        async def __call__(self, args, timeout=0, cancel_token=None):
+            out = Path(args[-1])
+            if "-ss" in args:
+                self.seeks.append(float(args[args.index("-ss") + 1]))
+            if out.name == "cover.jpg" and len(self.seeks) <= 3:
+                return 1, "", "Nothing was written into output file"
+            out.write_bytes(b"\xff\xd8" + b"0" * 1000)
+            return 0, "", ""
+
+    fake = _FailFirst()
+    monkeypatch.setattr(thumb_mod, "run_process", fake)
+    ts = await make_thumbnails("v.mkv", tmp_path, 1532.5, rng=random.Random(2))
+    assert ts.cover and ts.thumb                       # HD cover not lost
+    assert len(fake.seeks) == 4                        # 3 failures, 4th worked
+    assert fake.seeks[-1] == 3.0
+
+
+async def test_all_positions_failing_falls_back_to_the_small_thumbnail(
+        tmp_path, monkeypatch, caplog):
+    class _CoverNeverWorks(_FakeRun):
+        async def __call__(self, args, timeout=0, cancel_token=None):
+            out = Path(args[-1])
+            if "-ss" in args:
+                self.seeks.append(float(args[args.index("-ss") + 1]))
+            if out.name == "cover.jpg":
+                return 1, "", "no packets"
+            out.write_bytes(b"\xff\xd8" + b"0" * 1000)
+            return 0, "", ""
+
+    import logging
+    monkeypatch.setattr(thumb_mod, "run_process", _CoverNeverWorks())
+    with caplog.at_level(logging.WARNING, logger="bot.services.thumbnail"):
+        ts = await make_thumbnails("v.mkv", tmp_path, 1000.0, rng=random.Random(5))
+    assert ts.cover is None and ts.thumb               # small thumb still made
+    assert "No HD cover" in caplog.text
+
+
+@needs_ffmpeg
+async def test_real_ffmpeg_audio_longer_than_video_still_gets_an_hd_cover(
+        tmp_path: Path):
+    # 30 s of video but 120 s of audio: the container claims 120 s, so random /
+    # 12% positions can land past the end of the picture.
+    src = tmp_path / "audio_longer.mp4"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24:duration=30",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=120",
+         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(src)],
+        check=True,
+    )
+    for seed in range(6):                               # several random draws
+        ts = await make_thumbnails(str(src), tmp_path / f"o{seed}", 120.0,
+                                   rng=random.Random(seed))
+        assert ts.cover and Path(ts.cover).stat().st_size > 5_000, seed
+        assert ts.thumb
