@@ -320,12 +320,36 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
             reply_markup=keyboards.cancel_only(job.id),
         )
 
+    # Optional backup: the temporary FreeConvert link, sent the moment the
+    # cloud encode finishes (before the download) when the user turned
+    # "🔗 FC link" on in /settings.
+    from bot.services.user_settings import value_of as _setting
+    send_link = _setting(settings or {}, "fc_link") == "on"
+
+    async def _send_link(label: str, url: str) -> None:
+        import html as _html
+        from pyrogram import enums
+        title = f"🔗 <b>FreeConvert link</b>" + (f" · {_html.escape(label)}" if label else "")
+        try:
+            await rt.client.send_message(
+                job.chat_id,
+                f"{title}\n<a href=\"{_html.escape(url, quote=True)}\">⬇️ Download</a>\n"
+                "<i>Temporary link — keep it private. Use it if the upload "
+                "to Telegram fails.</i>",
+                parse_mode=enums.ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — a backup must never break the job
+            log.warning("Could not send the FreeConvert link: %s", exc)
+
     # (quality height, file) for each produced output, in the order picked.
     outputs: list[tuple[int, Path]] = []
+    skipped: list[str] = []
     if multi:
         # One FreeConvert job: the video is imported once and the subtitle is
         # sent once; every selected quality is its own convert + export task.
         keyed = {(f"{r}p" if r else "orig"): r for r in resolutions}
+        fc_failures: dict[str, str] = {}
         produced = await _cancellable(
             freeconvert.hardsub_remote_url_multi(
                 cfg.fc_keys_csv, video_url, job.input_name, sub_path,
@@ -333,11 +357,15 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
                 qualities={k: sizes[r] for k, r in keyed.items()},
                 quality_profile="balanced", style_key=style_key,
                 codec="h264", process_cb=_on_process,
-                download_cb=_on_download,
+                download_cb=_on_download, failures=fc_failures,
+                url_cb=((lambda k, u: _send_link(
+                    _res_label(keyed[k]), u)) if send_link else None),
             ),
             token,
         )
         outputs = [(keyed[k], Path(p)) for k, p in produced.items()]
+        for k, reason in fc_failures.items():
+            skipped.append(f"{_res_label(keyed[k])}: FreeConvert — {reason}")
     else:
         res = resolutions[0]
         output = await _cancellable(
@@ -347,6 +375,7 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
                 quality_profile="balanced", resize=sizes[res],
                 style_key=style_key, codec="h264",
                 process_cb=_on_process, download_cb=_on_download,
+                url_cb=((lambda u: _send_link("", u)) if send_link else None),
             ),
             token,
         )
@@ -357,7 +386,6 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
     # Validate every output; in a multi-quality run a bad one is skipped (and
     # reported) so the good ones are still delivered.
     ready: list[tuple[int, Path, int]] = []
-    skipped: list[str] = []
     limit_mb = cfg.max_output_size // 1024**2
     for res_h, path in outputs:
         size = path.stat().st_size if path.exists() else 0
