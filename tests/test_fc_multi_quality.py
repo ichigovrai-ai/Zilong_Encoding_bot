@@ -228,3 +228,251 @@ async def test_single_quality_run_still_uses_the_plain_path(env):
     (fc,) = env.calls["fc"]                                    # original fake
     assert fc["resize"] == (854, 480)
     assert len(env.calls["uploads"]) == 1
+
+
+# ── a quality FreeConvert doesn't deliver is retried, then reported ───────
+def _fc_job_response(missing: str | None = None) -> dict:
+    tasks = []
+    for q in ("360p", "720p"):
+        tasks.append({"name": f"convert_{q}", "status": "completed"})
+        if q == missing:
+            tasks[-1] = {"name": f"convert_{q}", "status": "failed",
+                         "message": "Out of conversion minutes"}
+            tasks.append({"name": f"export_{q}", "status": "pending",
+                          "result": {}})
+        else:
+            tasks.append({"name": f"export_{q}", "status": "completed",
+                          "result": {"url": f"https://fc/{q}.mp4"}})
+    return {"id": "job1", "status": "completed", "tasks": tasks}
+
+
+@pytest.fixture
+def fc_net(monkeypatch, tmp_path):
+    """Replace every network/FS step of hardsub_remote_url_multi."""
+    sub = tmp_path / "sub.ass"
+    sub.write_text("[Script Info]\n")
+    state = SimpleNamespace(job=_fc_job_response(), single_calls=[],
+                            single_error=None, sub=str(sub), dest=str(tmp_path),
+                            events=[])
+
+    async def _key(keys): return "k"
+    async def _codec(api_key, codec, cfg, fmt): return "h264", {}, 128
+    async def _post(api_key, payload): return {"id": "job1"}
+    async def _wait(api_key, job_id, cb): return state.job
+
+    async def _download(url, dest, cb=None):
+        state.events.append(("download", url))
+        Path(dest).write_bytes(b"x" * 10)
+        return dest
+
+    async def _single(api_keys, video_url, source_name, sub_path, dest_dir, **kw):
+        state.single_calls.append(kw["resize"])
+        if state.single_error:
+            raise state.single_error
+        if kw.get("url_cb"):
+            await kw["url_cb"]("https://fc/retry.mp4")
+        out = Path(dest_dir) / f"retry_{kw['resize'][1]}p.mp4"
+        out.write_bytes(b"y" * 10)
+        return str(out)
+
+    monkeypatch.setattr(freeconvert, "pick_working_key", _key)
+    monkeypatch.setattr(freeconvert, "_codec_setup", _codec)
+    monkeypatch.setattr(freeconvert, "_post_job", _post)
+    monkeypatch.setattr(freeconvert, "_wait_for_job", _wait)
+    monkeypatch.setattr(freeconvert, "_download_file", _download)
+    monkeypatch.setattr(freeconvert, "hardsub_remote_url", _single)
+    monkeypatch.setattr(freeconvert, "merge_fc_video_options",
+                        lambda *a, **k: None)
+    return state
+
+
+async def _call(st, failures=None, url_cb=None):
+    return await freeconvert.hardsub_remote_url_multi(
+        "key", "https://cdn/ep.mkv", "Show - 12.mkv", st.sub, st.dest,
+        qualities={"360p": (640, 360), "720p": (1280, 720)},
+        failures=failures, url_cb=url_cb)
+
+
+async def test_all_qualities_delivered_by_the_grouped_job(fc_net):
+    out = await _call(fc_net)
+    assert set(out) == {"360p", "720p"} and not fc_net.single_calls
+
+
+async def test_missing_quality_is_retried_as_its_own_job(fc_net):
+    fc_net.job = _fc_job_response(missing="720p")
+    failures: dict[str, str] = {}
+    out = await _call(fc_net, failures)
+    assert set(out) == {"360p", "720p"}              # nothing lost
+    assert fc_net.single_calls == [(1280, 720)]      # only the missing one
+    assert failures == {}
+
+
+async def test_failure_reason_is_reported_when_the_retry_fails_too(fc_net):
+    fc_net.job = _fc_job_response(missing="720p")
+    fc_net.single_error = RuntimeError("FreeConvert quota exceeded")
+    failures: dict[str, str] = {}
+    out = await _call(fc_net, failures)
+    assert set(out) == {"360p"}                       # the good one is kept
+    reason = failures["720p"]
+    assert "convert_720p failed" in reason and "Out of conversion minutes" in reason
+    assert "quota exceeded" in reason
+
+
+async def test_nothing_exported_at_all_raises(fc_net):
+    fc_net.job = {"id": "j", "status": "completed", "tasks": []}
+    fc_net.single_error = RuntimeError("nope")
+    with pytest.raises(RuntimeError):
+        await _call(fc_net, {})
+
+
+async def test_pipeline_shows_why_a_quality_is_missing(env):
+    async def fake_multi(api_keys, video_url, source_name, subtitle_path,
+                         dest_dir, *, qualities, failures=None, **kw):
+        f = Path(dest_dir) / "Show 360p.mp4"
+        f.write_bytes(b"\0" * 2048)
+        failures["720p"] = "convert_720p failed (Out of conversion minutes)"
+        return {"360p": str(f)}
+
+    env.monkeypatch.setattr(fc_pipeline.freeconvert,
+                            "hardsub_remote_url_multi", fake_multi)
+    job = await _queued_job(env, source="upload", fc_res=360,
+                            fc_res_list=[360, 720])
+    texts: list[str] = []
+
+    async def _upd(text, reply_markup=None, force=False):
+        texts.append(text)
+
+    job = await env.rt.repo.get(job.id)
+    await fc_pipeline.run_fc_job(env.rt, job, CancelToken(),
+                                 SimpleNamespace(update=_upd), 0.0, {}, "A")
+    assert len(env.calls["uploads"]) == 1
+    final = next(t for t in reversed(texts) if "COMPLETED" in t)
+    assert "Skipped" in final and "720p" in final and "Out of conversion" in final
+
+
+# ── optional FreeConvert download link, sent before the download ──────────
+async def test_links_are_handed_over_before_any_download(fc_net):
+    async def url_cb(quality, url):
+        fc_net.events.append(("link", quality, url))
+
+    await _call(fc_net, url_cb=url_cb)
+    kinds = [e[0] for e in fc_net.events]
+    assert kinds == ["link", "link", "download", "download"]   # links first
+    assert fc_net.events[0][1:] == ("360p", "https://fc/360p.mp4")
+    assert fc_net.events[1][1:] == ("720p", "https://fc/720p.mp4")
+
+
+async def test_a_failing_link_callback_never_blocks_the_download(fc_net):
+    async def url_cb(quality, url):
+        raise RuntimeError("telegram is down")
+
+    out = await _call(fc_net, url_cb=url_cb)
+    assert set(out) == {"360p", "720p"}
+
+
+async def test_retried_quality_gets_its_link_too(fc_net):
+    fc_net.job = _fc_job_response(missing="720p")
+    got = []
+
+    async def url_cb(quality, url):
+        got.append((quality, url))
+
+    await _call(fc_net, url_cb=url_cb)
+    assert ("360p", "https://fc/360p.mp4") in got
+    assert ("720p", "https://fc/retry.mp4") in got            # labelled with its quality
+
+
+def test_fc_link_setting_is_opt_in():
+    from bot.services.user_settings import button_label, next_value, value_of
+    assert value_of({}, "fc_link") == "off"                    # off by default
+    assert next_value({}, "fc_link") == "on"
+    assert "FC link" in button_label({}, "fc_link")
+    assert value_of({"fc_link": "on"}, "fc_link") == "on"
+
+
+class _Chat:
+    def __init__(self, fail=False):
+        self.messages: list[str] = []
+        self.fail = fail
+
+    async def send_message(self, chat_id, text, **kw):
+        if self.fail:
+            raise RuntimeError("flood")
+        self.messages.append(text)
+
+
+async def _run_with_link_setting(env, settings, client, multi=True):
+    import dataclasses
+    rt = dataclasses.replace(env.rt, client=client)
+
+    async def fake_multi(api_keys, video_url, source_name, subtitle_path,
+                         dest_dir, *, qualities, url_cb=None, **kw):
+        if url_cb:
+            for label in qualities:
+                await url_cb(label, f"https://fc/{label}.mp4?sig=a&x=1")
+        out = {}
+        for label in qualities:
+            f = Path(dest_dir) / f"Show {label}.mp4"
+            f.write_bytes(b"\0" * 2048)
+            out[label] = str(f)
+        return out
+
+    async def fake_single(api_keys, video_url, source_name, subtitle_path,
+                          dest_dir, *, url_cb=None, **kw):
+        if url_cb:
+            await url_cb("https://fc/single.mp4")
+        f = Path(dest_dir) / "Show.mp4"
+        f.write_bytes(b"\0" * 2048)
+        return str(f)
+
+    env.monkeypatch.setattr(fc_pipeline.freeconvert, "hardsub_remote_url_multi", fake_multi)
+    env.monkeypatch.setattr(fc_pipeline.freeconvert, "hardsub_remote_url", fake_single)
+    job = await _queued_job(env, source="upload", fc_res=720,
+                            fc_res_list=[720, 480] if multi else [720])
+    job = await env.rt.repo.get(job.id)
+
+    async def _upd(text, reply_markup=None, force=False):
+        return None
+
+    await fc_pipeline.run_fc_job(rt, job, CancelToken(),
+                                 SimpleNamespace(update=_upd), 0.0, settings, "A")
+    return rt, job
+
+
+async def test_pipeline_sends_one_link_per_quality_when_enabled(env):
+    chat = _Chat()
+    await _run_with_link_setting(env, {"fc_link": "on"}, chat)
+    assert len(chat.messages) == 2
+    assert "720p" in chat.messages[0] and "480p" in chat.messages[1]
+    assert 'href="https://fc/720p.mp4?sig=a&amp;x=1"' in chat.messages[0]   # escaped
+    assert "Temporary link" in chat.messages[0]
+    assert len(env.calls["uploads"]) == 2                      # uploads unaffected
+
+
+async def test_pipeline_sends_the_link_for_a_single_quality(env):
+    chat = _Chat()
+    await _run_with_link_setting(env, {"fc_link": "on"}, chat, multi=False)
+    assert len(chat.messages) == 1
+    assert "https://fc/single.mp4" in chat.messages[0]
+    assert "·" not in chat.messages[0].split("\n")[0]          # no quality label
+
+
+async def test_pipeline_sends_no_link_by_default(env):
+    chat = _Chat()
+    await _run_with_link_setting(env, {}, chat)
+    assert chat.messages == []
+    assert len(env.calls["uploads"]) == 2
+
+
+async def test_pipeline_sends_no_link_when_the_setting_is_off(env):
+    chat = _Chat()
+    await _run_with_link_setting(env, {"fc_link": "off"}, chat, multi=False)
+    assert chat.messages == []
+    assert len(env.calls["uploads"]) == 1
+
+
+async def test_a_failing_link_message_never_fails_the_job(env):
+    rt, job = await _run_with_link_setting(env, {"fc_link": "on"},
+                                           _Chat(fail=True))
+    assert len(env.calls["uploads"]) == 2
+    assert (await env.rt.repo.get(job.id)).status == JobStatus.COMPLETED
