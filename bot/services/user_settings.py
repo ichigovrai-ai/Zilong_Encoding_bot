@@ -47,6 +47,9 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("sub_lang", "💬 Sub lang",
             ("fr", "en", "es", "pt", "ar", "de", "it", "ja", "off"), "fr", _LANG.get),
     Setting("seedr_hardsub", "🔥 Seedr hardsub", ("on", "off"), "on", _ONOFF.get),
+    # Opt-in: send FreeConvert's temporary download link as soon as the cloud
+    # encode is done, as a backup in case fetching/uploading the file fails.
+    Setting("fc_link", "🔗 FC link", ("off", "on"), "off", _ONOFF.get),
     Setting("def_resolution", "🖥 Resolution",
             ("original", "360", "480", "720", "1080", "1440", "2160"),
             "original", _res),
