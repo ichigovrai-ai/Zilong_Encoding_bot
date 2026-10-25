@@ -57,6 +57,27 @@ def pick_seek(duration_s: float, rng: random.Random | None = None) -> float:
     return round((rng or random).uniform(lo, hi), 2)
 
 
+def seek_chain(duration_s: float, randomize: bool = True,
+               rng: random.Random | None = None) -> list[float]:
+    """Positions to try for the HD cover, best first.
+
+    A random moment first, then ever safer ones. The reported duration can be
+    longer than the video track itself (audio running past the video, a
+    container header that overstates the length): seeking past the end of the
+    video makes FFmpeg write nothing, so each fallback is closer to the start,
+    and 0 — always valid — closes the chain.
+    """
+    candidates = [pick_seek(duration_s, rng)] if randomize else []
+    candidates += [fixed_seek(duration_s), round(duration_s * 0.05, 2), 3.0, 0.0]
+    chain: list[float] = []
+    for s in candidates:
+        if s < 0 or (s > 0 and duration_s > 0 and s >= duration_s - 1):
+            continue
+        if all(abs(s - c) >= 0.1 for c in chain):
+            chain.append(s)
+    return chain or [0.0]
+
+
 async def make_thumbnails(
     video_path: str, out_dir: str | Path, duration_s: float, *,
     media: MediaInfo | None = None,
@@ -72,7 +93,7 @@ async def make_thumbnails(
     cover = out_dir / "cover.jpg"
     thumb = out_dir / "thumb.jpg"
 
-    seek = pick_seek(duration_s, rng) if randomize else fixed_seek(duration_s)
+    chain = seek_chain(duration_s, randomize, rng)
 
     # thumbnail=n=60 → pick the best of ~60 frames; scale caps width at 1280
     # without upscaling (min(1280,iw)); HDR gets tone-mapped to SDR so the
@@ -88,6 +109,7 @@ async def make_thumbnails(
         cover_args = [
             ffmpeg, "-hide_banner", "-y", "-nostdin",
             "-ss", f"{at:.2f}", "-i", video_path,
+            "-an", "-sn", "-dn",
             "-frames:v", "1", "-vf", vf, "-q:v", "2", str(cover),
         ]
         try:
@@ -102,14 +124,19 @@ async def make_thumbnails(
         return False
 
     result = ThumbSet()
-    if await _make_cover(seek):
-        result.cover = str(cover)
-    elif randomize and fixed_seek(duration_s) != seek:
-        # The random moment gave nothing (odd timestamps/duration): fall back
-        # to the safe fixed position rather than losing the preview.
-        seek = fixed_seek(duration_s)
-        if await _make_cover(seek):
+    seek = chain[-1]
+    for attempt, at in enumerate(chain):
+        if await _make_cover(at):
             result.cover = str(cover)
+            seek = at
+            if attempt:
+                log.info("HD cover made at %.1fs after %d failed position(s)",
+                         at, attempt)
+            break
+    else:
+        log.warning("No HD cover for %s: all %d positions failed (duration "
+                    "reported %.1fs) — falling back to the small thumbnail",
+                    Path(video_path).name, len(chain), duration_s)
 
     # Telegram thumb: derive the ≤320px version from the cover we just made
     # (fast, and guarantees the same frame). Fall back to the source.
