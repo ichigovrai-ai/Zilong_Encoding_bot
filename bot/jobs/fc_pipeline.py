@@ -342,79 +342,46 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
         except Exception as exc:  # noqa: BLE001 — a backup must never break the job
             log.warning("Could not send the FreeConvert link: %s", exc)
 
-    # (quality height, file) for each produced output, in the order picked.
-    outputs: list[tuple[int, Path]] = []
-    skipped: list[str] = []
-    if multi:
-        # One FreeConvert job: the video is imported once and the subtitle is
-        # sent once; every selected quality is its own convert + export task.
-        keyed = {(f"{r}p" if r else "orig"): r for r in resolutions}
-        fc_failures: dict[str, str] = {}
-        produced = await _cancellable(
-            freeconvert.hardsub_remote_url_multi(
-                cfg.fc_keys_csv, video_url, job.input_name, sub_path,
-                str(out_dir),
-                qualities={k: sizes[r] for k, r in keyed.items()},
-                quality_profile="balanced", style_key=style_key,
-                codec="h264", process_cb=_on_process,
-                download_cb=_on_download, failures=fc_failures,
-                url_cb=((lambda k, u: _send_link(
-                    _res_label(keyed[k]), u)) if send_link else None),
-            ),
-            token,
-        )
-        outputs = [(keyed[k], Path(p)) for k, p in produced.items()]
-        for k, reason in fc_failures.items():
-            skipped.append(f"{_res_label(keyed[k])}: FreeConvert — {reason}")
-    else:
-        res = resolutions[0]
-        output = await _cancellable(
-            freeconvert.hardsub_remote_url(
-                cfg.fc_keys_csv, video_url, job.input_name, sub_path,
-                str(out_dir),
-                quality_profile="balanced", resize=sizes[res],
-                style_key=style_key, codec="h264",
-                process_cb=_on_process, download_cb=_on_download,
-                url_cb=((lambda u: _send_link("", u)) if send_link else None),
-            ),
-            token,
-        )
-        outputs = [(res, Path(output))]
-    token.raise_if_cancelled()
-    await rt.repo.update_fields(job.id, output_path=str(outputs[0][1]))
-
-    # Validate every output; in a multi-quality run a bad one is skipped (and
-    # reported) so the good ones are still delivered.
-    ready: list[tuple[int, Path, int]] = []
+    # ── 4. Delivery ─────────────────────────────────────────────────────
+    # Each finished quality is validated, uploaded and dumped by `_deliver`.
+    # In a multi-quality run it is called while FreeConvert is still
+    # compressing the others, so the first version reaches you without
+    # waiting for the slowest one.
+    from bot.services.user_settings import value_of
+    upload_pref = value_of(settings or {}, "upload_as")
+    upload_stages = panels.pipeline_stages("upload", with_subtitles=True)
     limit_mb = cfg.max_output_size // 1024**2
-    for res_h, path in outputs:
-        size = path.stat().st_size if path.exists() else 0
-        if size == 0:
+    skipped: list[str] = []
+    delivered: list[tuple[int, Path, int]] = []     # (quality, file, bytes)
+    seen_paths: set[str] = set()
+    stage = {"uploading": False}
+
+    async def _deliver(res_h: int, output_path: Path) -> None:
+        if str(output_path) in seen_paths:          # idempotent
+            return
+        seen_paths.add(str(output_path))
+        token.raise_if_cancelled()
+        out_size = output_path.stat().st_size if output_path.exists() else 0
+        if out_size == 0:
             if not multi:
                 raise ValidationError("FreeConvert returned an empty file.")
             skipped.append(f"{_res_label(res_h)}: empty file")
-        elif size > cfg.max_output_size:
+            return
+        if out_size > cfg.max_output_size:
             if not multi:
                 raise ValidationError(
-                    f"The encoded file ({size // 1024**2} MB) exceeds the "
+                    f"The encoded file ({out_size // 1024**2} MB) exceeds the "
                     f"configured output limit ({limit_mb} MB). "
                     "Pick a lower quality and try again.")
-            skipped.append(f"{_res_label(res_h)}: {size // 1024**2} MB "
+            skipped.append(f"{_res_label(res_h)}: {out_size // 1024**2} MB "
                            f"is over the {limit_mb} MB limit")
-        else:
-            ready.append((res_h, path, size))
-    if not ready:
-        raise ValidationError("No output could be delivered: "
-                              + "; ".join(skipped))
+            return
 
-    # ── 4. Upload ───────────────────────────────────────────────────────
-    from bot.services.user_settings import value_of
-    await rt.repo.transition(job.id, JobStatus.UPLOADING, stage="uploading")
-    upload_pref = value_of(settings or {}, "upload_as")
-    upload_stages = panels.pipeline_stages("upload", with_subtitles=True)
-
-    for idx, (res_h, output_path, out_size) in enumerate(ready, start=1):
-        token.raise_if_cancelled()
+        if not stage["uploading"]:
+            stage["uploading"] = True
+            await rt.repo.update_fields(job.id, output_path=str(output_path))
+            await rt.repo.transition(job.id, JobStatus.UPLOADING,
+                                     stage="uploading")
         out_media: MediaInfo | None = None
         try:
             out_media = await probe_media(str(output_path),
@@ -427,18 +394,17 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
             media=out_media, ffmpeg=cfg.ffmpeg_path, cancel_token=token,
         )
         upload_started = time.monotonic()
-        title = ("Uploading" if len(ready) == 1
-                 else f"Uploading {idx}/{len(ready)}")
+        title = ("Uploading" if not multi
+                 else f"Uploading {len(delivered) + 1}/{len(resolutions)}")
 
-        async def _upl_progress(done: int, total: int, _p=output_path,
-                                _t=title, _u=upload_started) -> None:
+        async def _upl_progress(done: int, total: int) -> None:
             await rt.repo.update_fields(
                 job.id, progress=done / total * 100 if total else 0)
-            elapsed_ul = time.monotonic() - _u
+            elapsed_ul = time.monotonic() - upload_started
             speed = done / elapsed_ul if elapsed_ul > 1 else 0.0
             await reporter.update(
                 panels.transfer_panel(
-                    title=_t, icon="📤", filename=_p.name,
+                    title=title, icon="📤", filename=output_path.name,
                     done=done, total=total, speed=speed, elapsed=elapsed_ul,
                     source="Telegram 📲", stages=upload_stages, style=style,
                 ),
@@ -466,13 +432,62 @@ async def run_fc_job(rt: Runtime, job: Job, token: CancelToken,
                 cancelled=lambda: token.cancelled,
             )
         await send_to_dumps(rt.client, cfg, job.user_id, sent, db=rt.db)
+        delivered.append((res_h, output_path, out_size))
+
+    # ── 3. FreeConvert ──────────────────────────────────────────────────
+    if multi:
+        # One FreeConvert job: the video is imported once and the subtitle is
+        # sent once; every selected quality is its own convert + export task.
+        keyed = {(f"{r}p" if r else "orig"): r for r in resolutions}
+        fc_failures: dict[str, str] = {}
+
+        async def _on_ready(label: str, path: str) -> None:
+            await _deliver(keyed[label], Path(path))
+
+        produced = await _cancellable(
+            freeconvert.hardsub_remote_url_multi(
+                cfg.fc_keys_csv, video_url, job.input_name, sub_path,
+                str(out_dir),
+                qualities={k: sizes[r] for k, r in keyed.items()},
+                quality_profile="balanced", style_key=style_key,
+                codec="h264", process_cb=_on_process,
+                download_cb=_on_download, failures=fc_failures,
+                url_cb=((lambda k, u: _send_link(
+                    _res_label(keyed[k]), u)) if send_link else None),
+                on_ready=_on_ready,
+            ),
+            token,
+        )
+        # Anything not already delivered while FreeConvert was still working.
+        for label, path in produced.items():
+            await _deliver(keyed[label], Path(path))
+        for label, reason in fc_failures.items():
+            skipped.append(f"{_res_label(keyed[label])}: FreeConvert — {reason}")
+    else:
+        res = resolutions[0]
+        output = await _cancellable(
+            freeconvert.hardsub_remote_url(
+                cfg.fc_keys_csv, video_url, job.input_name, sub_path,
+                str(out_dir),
+                quality_profile="balanced", resize=sizes[res],
+                style_key=style_key, codec="h264",
+                process_cb=_on_process, download_cb=_on_download,
+                url_cb=((lambda u: _send_link("", u)) if send_link else None),
+            ),
+            token,
+        )
+        await _deliver(res, Path(output))
+    token.raise_if_cancelled()
+    if not delivered:
+        raise ValidationError("No output could be delivered: "
+                              + "; ".join(skipped))
 
     await rt.repo.transition(job.id, JobStatus.COMPLETED, stage="done")
-    shown = (ready[0][1].name if len(ready) == 1 else
-             f"{len(ready)} files · " + " + ".join(_res_label(r)
-                                                   for r, _, _ in ready))
+    shown = (delivered[0][1].name if len(delivered) == 1 else
+             f"{len(delivered)} files · " + " + ".join(_res_label(r)
+                                                       for r, _, _ in delivered))
     done_text = panels.done_panel(
-        filename=shown, out_size=sum(sz for _, _, sz in ready),
+        filename=shown, out_size=sum(sz for _, _, sz in delivered),
         elapsed=time.monotonic() - started,
         settings_line=settings_line, job_id=job.id)
     if skipped:
