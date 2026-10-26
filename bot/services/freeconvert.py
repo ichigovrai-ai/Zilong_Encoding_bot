@@ -267,6 +267,7 @@ async def _wait_for_job(
     progress_cb: ProgressCB = None,
     timeout_s: int = 3600,
     ready: Optional[Callable[[dict], bool]] = None,
+    on_poll: Optional[Callable[[dict], Awaitable[None]]] = None,
 ) -> dict:
     """Attend la fin du job FreeConvert. Si la tâche du bot est annulée
     pendant l'attente (bouton Cancel), le job est aussi supprimé côté
@@ -281,6 +282,8 @@ async def _wait_for_job(
     try:
         while time.time() < deadline:
             job = await _job_status(api_key, job_id)
+            if on_poll:
+                await on_poll(job)     # may raise: that stops the wait
             status = str(job.get("status") or "")
             done = ready(job) if ready else True
             if status == "completed" and done:
@@ -652,6 +655,7 @@ async def hardsub_remote_url_multi(
     download_cb: ProgressCB = None,
     failures: Optional[dict[str, str]] = None,
     url_cb: Optional[Callable[[str, str], Awaitable[None]]] = None,
+    on_ready: Optional[Callable[[str, str], Awaitable[None]]] = None,
 ) -> dict[str, str]:
     """Hardsub en PLUSIEURS qualités avec un seul job FreeConvert.
 
@@ -660,6 +664,11 @@ async def hardsub_remote_url_multi(
     étiquette "orig"). Le sous-titre est stylé et envoyé une seule fois, la
     vidéo n'est importée qu'une fois ; chaque qualité devient une tâche
     convert + export.
+
+    Livraison au fil de l'eau : dès qu'une qualité a son lien d'export, elle
+    est téléchargée puis remise à `on_ready(étiquette, chemin)` (l'envoi vers
+    Telegram, par ex.) pendant que FreeConvert continue de compresser les
+    autres — pas besoin d'attendre la plus lente.
 
     Retourne {étiquette: chemin_du_fichier}. Une qualité dont l'export a
     échoué est absente du résultat (log warning) plutôt que de faire échouer
@@ -709,8 +718,6 @@ async def hardsub_remote_url_multi(
     job = await _post_job(api_key, payload)
     job_id = job.get("id", "?")
     quality_names = list(qualities)
-    job = await _wait_for_job(api_key, job_id, process_cb,
-                              ready=lambda j: _multi_ready(j, quality_names))
 
     def _cb_for(quality: str):
         if not download_cb:
@@ -721,37 +728,77 @@ async def hardsub_remote_url_multi(
         return _quality_download_cb
 
     results: dict[str, str] = {}
-    missing: dict[str, str] = {}
     urls: dict[str, str] = {}
-    for quality in qualities:
-        export_task = _find_task(job, f"export_{quality}")
-        url = _task_export_url(export_task) if export_task else ""
-        if not url:
-            missing[quality] = _task_problem(job, quality)
-            log.warning("⚠️ FreeConvert : pas de fichier pour la qualité %s — %s",
-                        quality, missing[quality])
-            continue
-        urls[quality] = url
+    queued: set[str] = set()
+    queue: asyncio.Queue = asyncio.Queue()
+    busy = False        # a finished quality is being downloaded / delivered
 
-    # Every link goes out as soon as the cloud encode is done — before any
-    # download starts — so it's available even if a download then fails.
-    if url_cb:
-        for quality, url in urls.items():
+    async def _quiet_process(pct: float, msg: str) -> None:
+        # While a finished quality is downloading/uploading, the polling
+        # progress must not overwrite that panel.
+        if not busy and process_cb:
+            await process_cb(pct, msg)
+
+    async def _deliver_worker() -> None:
+        nonlocal busy
+        while True:
+            quality = await queue.get()
+            if quality is None:
+                return
+            busy = True
             try:
-                await url_cb(quality, url)
-            except Exception as exc:
-                log.warning("url_cb a échoué (non bloquant): %s", exc)
+                path = await _download_file(urls[quality], output_paths[quality],
+                                            _cb_for(quality))
+                results[quality] = path
+                if on_ready:
+                    await on_ready(quality, path)
+            finally:
+                busy = False
 
-    for quality, url in urls.items():
-        results[quality] = await _download_file(url, output_paths[quality],
-                                                _cb_for(quality))
+    worker = asyncio.ensure_future(_deliver_worker())
 
-    # A quality the grouped job didn't deliver is retried on its own (one
+    async def _on_poll(snapshot: dict) -> None:
+        if worker.done():
+            worker.result()       # a failed delivery stops the polling at once
+        for quality in quality_names:
+            if quality in queued:
+                continue
+            task = _find_task(snapshot, f"export_{quality}")
+            url = _task_export_url(task) if task else ""
+            if not url:
+                continue
+            queued.add(quality)
+            urls[quality] = url
+            # The link goes out the moment it exists, before any download.
+            if url_cb:
+                try:
+                    await url_cb(quality, url)
+                except Exception as exc:
+                    log.warning("url_cb a échoué (non bloquant): %s", exc)
+            queue.put_nowait(quality)
+
+    try:
+        job = await _wait_for_job(api_key, job_id, _quiet_process,
+                                  ready=lambda j: _multi_ready(j, quality_names),
+                                  on_poll=_on_poll)
+        await _on_poll(job)        # final snapshot (idempotent)
+        queue.put_nowait(None)
+        await worker               # every ready quality downloaded + delivered
+    except BaseException as exc:
+        worker.cancel()
+        if not isinstance(exc, asyncio.CancelledError):
+            await _delete_job(api_key, job_id)   # stop paying for the rest
+        raise
+
+    # A quality the grouped job never delivered is retried on its own (one
     # FreeConvert job per missing quality) before giving up on it.
+    missing = {q: _task_problem(job, q) for q in quality_names if q not in queued}
     for quality, reason in missing.items():
+        log.warning("⚠️ FreeConvert : pas de fichier pour la qualité %s — %s",
+                    quality, reason)
         log.info("🔁 FreeConvert : nouvel essai de %s en job séparé", quality)
         try:
-            results[quality] = await hardsub_remote_url(
+            path = await hardsub_remote_url(
                 api_keys, video_url, source_name, subtitle_path, dest_dir,
                 quality_profile=quality_profile, resize=qualities[quality],
                 style_key=style_key, codec=codec,
@@ -759,6 +806,9 @@ async def hardsub_remote_url_multi(
                 url_cb=(None if url_cb is None else
                         (lambda u, _q=quality: url_cb(_q, u))),
             )
+            results[quality] = path
+            if on_ready:
+                await on_ready(quality, path)
         except Exception as exc:  # noqa: BLE001 — CancelledError isn't an Exception
             log.warning("⚠️ FreeConvert : l'essai séparé de %s a échoué: %s",
                         quality, exc)
