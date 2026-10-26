@@ -1,6 +1,7 @@
 """FreeConvert multi-quality: tick several qualities, Done, one FC run."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -504,10 +505,14 @@ class _Polls:
         return self.snapshots.pop(0) if len(self.snapshots) > 1 else self.snapshots[0]
 
 
+_real_sleep = asyncio.sleep
+
+
 @pytest.fixture
 def no_sleep(monkeypatch):
     async def _s(_):
-        return None
+        for _i in range(5):          # no waiting, but let other tasks run
+            await _real_sleep(0)
     monkeypatch.setattr(freeconvert.asyncio, "sleep", _s)
 
 
@@ -600,3 +605,151 @@ async def test_every_quality_failed_error_names_the_reason(
     fc_net.single_error = RuntimeError("still no")
     with pytest.raises(RuntimeError, match="bad url"):
         await _call(fc_net)
+
+
+# ── each quality is delivered as soon as it is ready ──────────────────────
+def _first_ready_snapshot():
+    return _job("completed",
+                _task("import-video", "completed"),
+                _task("convert_360p", "completed"),
+                _task("export_360p", "completed", "https://fc/360p.mp4"),
+                _task("convert_720p", "processing"),
+                _task("export_720p", "created"))
+
+
+async def test_first_quality_is_delivered_before_the_second_is_ready(
+        fc_net, monkeypatch, no_sleep):
+    order: list = []
+    n = {"polls": 0}
+
+    async def status(api_key, job_id):
+        n["polls"] += 1
+        if n["polls"] == 1:
+            return _first_ready_snapshot()
+        order.append("2nd poll")                  # 720p only lands now
+        return _fc_job_response()
+
+    async def on_ready(quality, path):
+        order.append(("ready", quality))
+
+    monkeypatch.setattr(freeconvert, "_job_status", status)
+    monkeypatch.setattr(freeconvert, "_wait_for_job", _real_wait)
+    out = await freeconvert.hardsub_remote_url_multi(
+        "key", "https://cdn/ep.mkv", "Show - 12.mkv", fc_net.sub, fc_net.dest,
+        qualities={"360p": (640, 360), "720p": (1280, 720)}, on_ready=on_ready)
+
+    assert order == [("ready", "360p"), "2nd poll", ("ready", "720p")]
+    assert set(out) == {"360p", "720p"}
+
+
+async def test_polling_progress_stays_quiet_while_a_quality_is_delivered(
+        fc_net, monkeypatch, no_sleep):
+    state = {"delivering": False, "polls": 0}
+    shown_during_delivery: list = []
+
+    async def status(api_key, job_id):
+        state["polls"] += 1
+        # 360p ready from the first poll; 720p only after several more polls
+        return _first_ready_snapshot() if state["polls"] < 6 else _fc_job_response()
+
+    async def on_ready(quality, path):
+        if quality == "360p":
+            state["delivering"] = True
+            for _ in range(60):                    # a slow upload
+                await _real_sleep(0)
+            state["delivering"] = False
+
+    async def process_cb(pct, msg):
+        if state["delivering"]:
+            shown_during_delivery.append(msg)
+
+    monkeypatch.setattr(freeconvert, "_job_status", status)
+    monkeypatch.setattr(freeconvert, "_wait_for_job", _real_wait)
+    await freeconvert.hardsub_remote_url_multi(
+        "key", "https://cdn/ep.mkv", "Show - 12.mkv", fc_net.sub, fc_net.dest,
+        qualities={"360p": (640, 360), "720p": (1280, 720)},
+        on_ready=on_ready, process_cb=process_cb)
+    assert shown_during_delivery == []             # upload panel never overwritten
+
+
+async def test_a_failed_delivery_stops_the_run_and_deletes_the_fc_job(
+        fc_net, monkeypatch, no_sleep):
+    deleted: list = []
+
+    async def status(api_key, job_id):
+        return _first_ready_snapshot()             # 720p never finishes
+
+    async def on_ready(quality, path):
+        raise RuntimeError("upload to Telegram failed")
+
+    async def fake_delete(api_key, job_id):
+        deleted.append(job_id)
+
+    monkeypatch.setattr(freeconvert, "_job_status", status)
+    monkeypatch.setattr(freeconvert, "_wait_for_job", _real_wait)
+    monkeypatch.setattr(freeconvert, "_delete_job", fake_delete)
+    with pytest.raises(RuntimeError, match="upload to Telegram failed"):
+        await freeconvert.hardsub_remote_url_multi(
+            "key", "https://cdn/ep.mkv", "Show - 12.mkv", fc_net.sub, fc_net.dest,
+            qualities={"360p": (640, 360), "720p": (1280, 720)},
+            on_ready=on_ready)
+    assert deleted == ["job1"]                     # no more paid conversions
+
+
+async def test_pipeline_uploads_the_first_quality_while_the_second_is_pending(env):
+    seen: dict = {}
+
+    async def fake_multi(api_keys, video_url, source_name, subtitle_path,
+                         dest_dir, *, qualities, on_ready=None, **kw):
+        out = {}
+        for i, label in enumerate(qualities):
+            f = Path(dest_dir) / f"Show {label}.mp4"
+            f.write_bytes(b"\0" * 2048)
+            out[label] = str(f)
+            await on_ready(label, str(f))
+            if i == 0:
+                # the 2nd quality has not been produced yet — yet #1 is already up
+                seen["uploads_after_first"] = len(env.calls["uploads"])
+                seen["status_after_first"] = (
+                    await env.rt.repo.get(job.id)).status
+        return out
+
+    env.monkeypatch.setattr(fc_pipeline.freeconvert,
+                            "hardsub_remote_url_multi", fake_multi)
+    job = await _queued_job(env, source="upload", fc_res=720,
+                            fc_res_list=[720, 480])
+    await _run(env, job)
+
+    assert seen["uploads_after_first"] == 1
+    assert seen["status_after_first"] == JobStatus.UPLOADING
+    names = [Path(p).name for p, _ in env.calls["uploads"]]
+    assert names == ["Show 720p.mp4", "Show 480p.mp4"]      # no duplicate upload
+    assert (await env.rt.repo.get(job.id)).status == JobStatus.COMPLETED
+
+
+async def test_pipeline_bad_first_quality_does_not_block_the_second(env):
+    async def fake_multi(api_keys, video_url, source_name, subtitle_path,
+                         dest_dir, *, qualities, on_ready=None, **kw):
+        out = {}
+        for i, label in enumerate(qualities):
+            f = Path(dest_dir) / f"Show {label}.mp4"
+            f.write_bytes(b"" if i == 0 else b"\0" * 2048)   # 1st is empty
+            out[label] = str(f)
+            await on_ready(label, str(f))
+        return out
+
+    env.monkeypatch.setattr(fc_pipeline.freeconvert,
+                            "hardsub_remote_url_multi", fake_multi)
+    job = await _queued_job(env, source="upload", fc_res=720,
+                            fc_res_list=[720, 480])
+    texts: list[str] = []
+
+    async def _upd(text, reply_markup=None, force=False):
+        texts.append(text)
+
+    job = await env.rt.repo.get(job.id)
+    await fc_pipeline.run_fc_job(env.rt, job, CancelToken(),
+                                 SimpleNamespace(update=_upd), 0.0, {}, "A")
+    assert len(env.calls["uploads"]) == 1
+    final = next(t for t in reversed(texts) if "COMPLETED" in t)
+    assert "Skipped" in final and "720p: empty file" in final
